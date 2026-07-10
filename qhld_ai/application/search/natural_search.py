@@ -66,8 +66,14 @@ class NaturalSearchSpeeches:
             self._resolver = self._resolver_from_corpus()
         return self._resolver
 
-    def execute(self, query, today, k=10, grouped=False, highlights=3) -> NaturalResult:
-        parsed = self.parser.parse(query, today)
+    def execute(self, query, today, k=10, grouped=False, highlights=3,
+                exclude=None, parsed=None) -> NaturalResult:
+        """``exclude`` is the "load more" cursor of ``search_grouped``: the
+        speech_ids already shown, skipped so the next call yields fresh speeches
+        (grouped mode only — flat hits have no stateless pagination). ``parsed``
+        lets a caller reuse a previous parse of the same query (the parse is an
+        LLM call), skipping the parser entirely."""
+        parsed = parsed or self.parser.parse(query, today)
         resolution = self.resolver().resolve(parsed)
         # Unresolved values are the raw material for catalog curation (a missing
         # alias scores a near miss; an out-of-catalog person scores low), so keep
@@ -90,7 +96,8 @@ class NaturalSearchSpeeches:
                 grouped=grouped)
         if grouped:
             hits = self.search.search_grouped(
-                semantic, page_size=k, highlights=highlights, filters=filters)
+                semantic, page_size=k, highlights=highlights, filters=filters,
+                exclude=exclude)
         else:
             hits = self.search.search(semantic, k=k, filters=filters)
         return NaturalResult(

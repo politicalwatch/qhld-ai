@@ -38,8 +38,9 @@ class _SpySearch:
         self.calls.append(("search", query, k, filters))
         return ["hit"]
 
-    def search_grouped(self, query, page_size=10, highlights=3, filters=None):
-        self.calls.append(("grouped", query, page_size, highlights, filters))
+    def search_grouped(self, query, page_size=10, highlights=3, filters=None,
+                       exclude=None):
+        self.calls.append(("grouped", query, page_size, highlights, filters, exclude))
         return ["group"]
 
 
@@ -80,9 +81,32 @@ def test_mentioned_person_filter_is_forwarded_to_search():
 def test_grouped_routes_to_search_grouped():
     service = _service(ParsedQuery(semantic_query="vivienda"), Resolution())
     service.execute("vivienda", today=date(2025, 7, 3), k=8, grouped=True, highlights=4)
-    kind, query, page_size, highlights, filters = service.search.calls[0]
+    kind, query, page_size, highlights, filters, exclude = service.search.calls[0]
     assert kind == "grouped"
     assert (query, page_size, highlights) == ("vivienda", 8, 4)
+    assert exclude is None
+
+
+def test_exclude_is_forwarded_to_grouped_search():
+    # "Load more": already-shown speech_ids skip retrieval so the next page
+    # yields fresh speeches.
+    service = _service(ParsedQuery(semantic_query="vivienda"), Resolution())
+    service.execute("vivienda", today=date(2025, 7, 3), grouped=True,
+                    exclude={"sp-1", "sp-2"})
+    assert service.search.calls[0][5] == {"sp-1", "sp-2"}
+
+
+def test_precomputed_parse_skips_the_parser():
+    # A caller paging through results reuses the first parse (an LLM call).
+    parsed = ParsedQuery(semantic_query="vivienda")
+    parser = _StubParser(ParsedQuery(semantic_query="SHOULD NOT BE USED"))
+    service = NaturalSearchSpeeches(
+        settings=Settings(_env_file=None), parser=parser,
+        search=_SpySearch(), resolver=_StubResolver(Resolution()))
+    result = service.execute("vivienda", today=date(2025, 7, 3), parsed=parsed)
+    assert not hasattr(parser, "query")          # parser never invoked
+    assert service.search.calls[0][1] == "vivienda"
+    assert result.parsed is parsed
 
 
 def test_no_filters_passes_none():
