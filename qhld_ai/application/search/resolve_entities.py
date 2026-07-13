@@ -16,6 +16,12 @@ service maps that onto what the index actually *stores*:
 - mentioned persons -> person ids (deputies, or non-deputies such as ministers, the
   King, regional presidents or foreign leaders), matched against the SAME person
   catalog that tags the corpus, then filtered on the payload ``mentions`` list.
+- constituencies -> the payload ``constituency`` official province value (as recorded
+  in the deputy catalog: "Coruña (A)", "Alicante/Alacant"). The parser already
+  canonicalizes demonyms to a province proper name; here the user-facing spelling is
+  mapped to the catalog spelling via mechanically-derived alias keys (bilingual "/"
+  variants, unfolded parenthesized articles) plus a few curated old names ("Lérida"),
+  with a fuzzy fallback.
 - ISO dates     -> a numeric ``date`` range ({"gte"/"lte": YYYYMMDD}).
 
 When several values resolve for one field, the filter value becomes a list (the
@@ -56,6 +62,9 @@ from qhld_ai.domain.mentions import PersonMatch, match_person
 _SPEAKER_THRESHOLD = 90
 _ROLE_THRESHOLD = 70      # "ministra de economía" ⊆ the full official title
 _GROUP_THRESHOLD = 80
+# High enough to keep provinces apart (they share few tokens), low enough for
+# spelling drift the alias keys don't cover ("Baleares" vs the official "Balears").
+_CONSTITUENCY_THRESHOLD = 85
 
 # Map the many ways a language can be named (or mis-coded by an LLM: "Gallego",
 # "cat") to the ISO code stored in the payload ``lang``. Payload uses es/ca/gl/eu.
@@ -74,6 +83,25 @@ GROUP_ALIASES_FILE = Path(__file__).parent / "group_aliases.json"
 _GENERIC_GROUP_TOKENS = {
     "grupo", "parlamentario", "parlamentaria", "partido", "politico", "politica",
     "bloque", "el", "la", "los", "las", "de", "del", "per",
+}
+
+# Tokens that carry no identity within a province name — articles and the
+# island/province scaffolding that official values fold into parentheses
+# ("Rioja (La)", "Balears (Illes)") and users write out ("La Rioja", "Islas
+# Baleares").
+_CONSTITUENCY_STOP_TOKENS = {
+    "el", "la", "los", "las", "a", "de", "del", "les", "illes", "islas",
+}
+
+# Curated spellings the mechanical alias keys cannot derive from the official
+# catalog value: pre-normalization Castilian names and the abbreviated Tenerife.
+_CONSTITUENCY_EXTRA_ALIASES = {
+    "S/C Tenerife": ("Santa Cruz de Tenerife", "Tenerife"),
+    "Lleida": ("Lérida",),
+    "Girona": ("Gerona",),
+    "Ourense": ("Orense",),
+    "Bizkaia": ("Vizcaya",),
+    "Gipuzkoa": ("Guipúzcoa",),
 }
 
 
@@ -140,6 +168,8 @@ class EntityResolver:
             self._resolve_role(result, parsed.speaker_title)
         if parsed.mentioned_persons:
             self._resolve_mentions(result, parsed.mentioned_persons, parsed.mentions_mode)
+        if parsed.constituencies:
+            self._resolve_constituencies(result, parsed.constituencies)
         if parsed.groups_or_parties:
             self._resolve_groups(result, parsed.groups_or_parties)
         self._resolve_dates(result, parsed)
@@ -215,6 +245,39 @@ class EntityResolver:
         if match.best_score >= self._mention_threshold:
             return "ambiguous: " + " / ".join(f"'{name}'" for name in match.candidates)
         return f"'{match.candidates[0]}' ({match.best_score})"
+
+    def _resolve_constituencies(self, result, raws):
+        aliases = {}
+        for value in self._distinct("constituency"):
+            if value:
+                for key in _constituency_keys(value):
+                    aliases.setdefault(key, value)
+        matched, misses = [], []
+        for raw in raws:
+            value, suggestion = self._match_constituency(raw, aliases)
+            if value:
+                result.notes.append(f"constituency: '{raw}' → '{value}'")
+                if value not in matched:
+                    matched.append(value)
+            else:
+                misses.append((raw, suggestion))
+        for raw, suggestion in misses:
+            _record_unresolved(result, "constituency", raw, blocking=not matched,
+                               suggestion=suggestion)
+        _set_filter(result, "constituency", matched)
+
+    @staticmethod
+    def _match_constituency(raw, aliases):
+        key = _normalize_constituency_key(raw)
+        if not key:
+            return None, None
+        if key in aliases:
+            return aliases[key], None
+        match = process.extractOne(
+            key, list(aliases), scorer=fuzz.token_set_ratio) if aliases else None
+        if match and match[1] >= _CONSTITUENCY_THRESHOLD:
+            return aliases[match[0]], None
+        return None, (f"'{aliases[match[0]]}' ({match[1]})" if match else None)
 
     def _resolve_lang(self, result, raw):
         code = _LANG_ALIASES.get(raw.strip().lower())
@@ -322,6 +385,29 @@ def _normalize_group_key(text: str) -> str:
     tokens = re.findall(r"[a-z0-9]+", _strip_accents(text.lower()))
     folded = (_fold_plural(t) for t in tokens)
     return " ".join(t for t in folded if t not in _GENERIC_GROUP_TOKENS)
+
+
+def _normalize_constituency_key(text: str) -> str:
+    """Reduce a province name to its distinctive tokens: lowercase, unaccent,
+    drop articles/scaffolding. 'La Rioja', 'Rioja (La)' and 'rioja' all reduce
+    to 'rioja'; 'Islas Baleares' to 'baleares'."""
+    tokens = re.findall(r"[a-z0-9]+", _strip_accents(text.lower()))
+    return " ".join(t for t in tokens if t not in _CONSTITUENCY_STOP_TOKENS)
+
+
+def _constituency_keys(value: str) -> set[str]:
+    """Alias keys for one official constituency value: the value itself, its
+    '/'-separated bilingual variants ('Alicante/Alacant'), the unfolded
+    parenthesized-article form ('Coruña (A)' → 'a coruña'), and the curated
+    extras ('Lérida' for 'Lleida')."""
+    variants = [value]
+    folded = re.match(r"(.+?)\s*\((.+)\)$", value)
+    if folded:
+        variants.append(f"{folded.group(2)} {folded.group(1)}")
+    else:
+        variants.extend(part for part in value.split("/") if len(part) > 1)
+    variants.extend(_CONSTITUENCY_EXTRA_ALIASES.get(value, ()))
+    return {key for key in map(_normalize_constituency_key, variants) if key}
 
 
 def _build_group_aliases(groups, curated=None) -> tuple[dict, dict, dict]:

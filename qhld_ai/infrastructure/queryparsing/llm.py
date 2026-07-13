@@ -38,7 +38,17 @@ aparecer todas (conjunción 'y'/'e', o una sola persona: 'que mencionen a Ayuso 
 Putin' → 'all'); 'any' si basta con una (disyunción 'o'/'u': 'que mencionen a \
 Ayuso o Putin' → 'any').
 - speaker_title: el cargo del orador cuando se le nombra por su cargo en lugar de \
-por su nombre (p. ej. 'ministra de economía'). Null en otro caso.
+por su nombre (p. ej. 'ministra de economía'). El término genérico \
+'diputados'/'diputadas' NO es un cargo. Null en otro caso.
+- constituencies: TODAS las provincias por las que deben estar electos los \
+diputados que intervienen, cuando la consulta filtra por circunscripción \
+('diputados de Cádiz' → ['Cádiz'], 'diputados del PSOE por Málaga' → \
+['Málaga']), un elemento por provincia, con el nombre propio de la provincia: \
+convierte los gentilicios ('diputados malagueños' → ['Málaga']). NO es un lugar \
+del que trate la intervención ('sobre la sequía en Málaga' → tema, no \
+circunscripción) ni un lugar que califique otra cosa ('la carga de trabajo en \
+Navantia de diputados de Cádiz' → el tema es la carga de trabajo en Navantia y \
+la circunscripción es Cádiz). Null si no se filtra por circunscripción.
 - groups_or_parties: TODOS los grupos parlamentarios o partidos políticos como \
 filtro, un elemento por grupo/partido (p. ej. 'del PSOE y del PP' → ['PSOE', \
 'PP']; 'del Grupo Socialista' → ['Grupo Socialista']). Si la consulta usa una \

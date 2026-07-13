@@ -13,6 +13,10 @@ pytestmark = pytest.mark.unit
 CORPUS = {
     "speaker": {"Abascal Conde, Santiago", "Montero Cuadrado, María Jesús", "Aagesen Muñoz, Sara", None},
     "role": {"Diputado", "Ministra de Hacienda", "Ministra de Economía, Comercio y Empresa"},
+    # Official catalog spellings, including every quirk class: parenthesized
+    # article, bilingual "/", abbreviation, plain.
+    "constituency": {"Málaga", "Cádiz", "Coruña (A)", "Rioja (La)", "Balears (Illes)",
+                     "Alicante/Alacant", "S/C Tenerife", "Lleida", None},
 }
 
 GROUPS = [
@@ -177,6 +181,61 @@ def test_shared_party_prefers_single_party_group_over_mixto(resolver):
     # for the verbatim alias and for the normalized colloquial forms alike.
     assert resolver.resolve(ParsedQuery(semantic_query="x", groups_or_parties=["PSOE"])).filters["group"] == "GS"
     assert resolver.resolve(ParsedQuery(semantic_query="x", groups_or_parties=["socialistas"])).filters["group"] == "GS"
+
+
+def test_constituency_exact_value(resolver):
+    r = resolver.resolve(ParsedQuery(semantic_query="x", constituencies=["Málaga"]))
+    assert r.filters["constituency"] == "Málaga"
+    assert not r.blocked
+
+
+def test_constituency_variants_map_to_official_spelling(resolver):
+    # Every quirk class of the official catalog values: parenthesized article,
+    # bilingual "/", abbreviation, curated old Castilian name, spelling drift.
+    for raw, official in [
+        ("A Coruña", "Coruña (A)"),
+        ("La Coruña", "Coruña (A)"),
+        ("La Rioja", "Rioja (La)"),
+        ("Alacant", "Alicante/Alacant"),
+        ("Alicante", "Alicante/Alacant"),
+        ("Tenerife", "S/C Tenerife"),
+        ("Santa Cruz de Tenerife", "S/C Tenerife"),
+        ("Lérida", "Lleida"),
+        ("Islas Baleares", "Balears (Illes)"),
+        ("Baleares", "Balears (Illes)"),
+    ]:
+        r = resolver.resolve(ParsedQuery(semantic_query="x", constituencies=[raw]))
+        assert r.filters.get("constituency") == official, \
+            f"'{raw}' → {r.filters.get('constituency')}"
+
+
+def test_multiple_constituencies_resolve_to_a_list(resolver):
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="x", constituencies=["Málaga", "Cádiz"]))
+    assert r.filters["constituency"] == ["Cádiz", "Málaga"]
+
+
+def test_unresolvable_constituency_blocks(resolver):
+    r = resolver.resolve(ParsedQuery(semantic_query="x", constituencies=["Narnia"]))
+    assert "constituency" not in r.filters
+    assert r.blocked
+    entity = r.unresolved[0]
+    assert (entity.field, entity.value, entity.blocking) == ("constituency", "Narnia", True)
+
+
+def test_partially_resolved_constituencies_keep_the_resolved_one(resolver):
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="x", constituencies=["Málaga", "Narnia"]))
+    assert r.filters["constituency"] == "Málaga"
+    assert not r.blocked
+
+
+def test_constituency_combines_with_group_filter(resolver):
+    # "diputados del PSOE por Málaga" → both filters, ANDed by the store.
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="x", constituencies=["Málaga"], groups_or_parties=["PSOE"]))
+    assert r.filters["constituency"] == "Málaga"
+    assert r.filters["group"] == "GS"
 
 
 def test_iso_dates_become_numeric_range(resolver):

@@ -56,3 +56,24 @@ def test_every_person_entity_is_collected(parser):
     parsed = parser.parse(
         "qué han dicho Pedro Sánchez y Santiago Abascal sobre inmigración", TODAY)
     assert parsed.speakers == ["Pedro Sánchez", "Santiago Abascal"]
+
+
+def test_location_after_deputies_cue_becomes_constituency(parser):
+    parsed = parser.parse(
+        "intervenciones sobre turistificación de diputados del PSOE por Málaga", TODAY)
+    assert parsed.constituencies == ["Málaga"]
+    assert parsed.groups_or_parties == ["PSOE"]
+    assert "málaga" not in parsed.semantic_query.lower()
+    assert "turistificación" in parsed.semantic_query.lower()
+
+
+def test_deputies_de_province(parser):
+    parsed = parser.parse("discursos de diputados de Cádiz sobre pesca", TODAY)
+    assert parsed.constituencies == ["Cádiz"]
+
+
+def test_topic_location_is_not_a_constituency(parser):
+    # "en Málaga" is where the topic happens, not who is elected there — and
+    # without a 'diputad…' cue a location never becomes a constituency.
+    parsed = parser.parse("intervenciones sobre la sequía en Málaga", TODAY)
+    assert parsed.constituencies is None

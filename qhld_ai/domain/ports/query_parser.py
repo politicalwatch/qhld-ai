@@ -47,6 +47,16 @@ class ParsedQuery(BaseModel):
         description=(
             "The speaker's office or role when referred to by title instead of name "
             "(e.g. 'ministra de economía', 'presidente del gobierno'). Null otherwise."))
+    constituencies: list[str] | None = Field(
+        default=None,
+        description=(
+            "Every Spanish province the SPEAKERS must be elected for, when the query "
+            "filters deputies by their constituency ('diputados de Cádiz', 'diputados "
+            "del PSOE por Málaga'), one list item per province, each given by the "
+            "province's proper name — convert demonyms ('diputados malagueños' → "
+            "['Málaga']). NOT a place the speech is about ('sobre la sequía en "
+            "Málaga') nor a location qualifying something else ('la fábrica de "
+            "Navantia en Cádiz'). Null if the query does not filter by constituency."))
     groups_or_parties: list[str] | None = Field(
         default=None,
         description=(

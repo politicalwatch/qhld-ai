@@ -1,7 +1,9 @@
 """Rule-based query parser — the baseline against the LLM parser.
 
 A conventional NLP pipeline: spaCy ``es_core_news_lg`` NER (PER → speakers,
-ORG/MISC → groups/parties) + light regex for titles/languages/legislature + a
+ORG/MISC → groups/parties, LOC after a "diputados de/por" cue → constituencies —
+demonyms like "malagueños" are knowingly out of reach without a gazetteer) +
+light regex for titles/languages/legislature + a
 relative-date regex backed by ``dateparser`` for absolute dates. It is
 deliberately *not* a re-implementation of the LLM's reasoning — it shows where an
 off-the-shelf rule/NER stack trails a structured-output LLM: it cannot tell a
@@ -35,6 +37,12 @@ _LANGS = {
 _LANG_RE = re.compile(r"\ben\s+(" + "|".join(_LANGS) + r")\b", re.IGNORECASE)
 _LEG_RE = re.compile(r"\blegislatura\s+(\d+)\b", re.IGNORECASE)
 
+# A LOC is a constituency only in a deputies-by-province query: 'diputad…'
+# appears somewhere and the place follows de/del/por ("diputados de Cádiz",
+# "diputados del PSOE por Málaga") — "en Málaga" stays a topic location.
+_CONSTITUENCY_CUE_RE = re.compile(r"\bdiputad\w*", re.IGNORECASE)
+_CONSTITUENCY_PREP_RE = re.compile(r"\b(?:de|del|por)\s*$", re.IGNORECASE)
+
 _NUMBER_WORDS = {
     "un": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6,
     "siete": 7, "ocho": 8, "nueve": 9, "diez": 10,
@@ -47,8 +55,8 @@ _REL_RANGE_RE = re.compile(
 
 # Query scaffolding stripped from the residual semantic query.
 _SCAFFOLD_RE = re.compile(
-    r"\b(intervenciones?|discursos?|debates?|qué|que|ha|han|dicho|dijo|sobre|acerca|"
-    r"de|del|la|el|los|las|en|un|una)\b", re.IGNORECASE)
+    r"\b(intervenciones?|discursos?|debates?|diputad[oa]s?|qué|que|ha|han|dicho|dijo|"
+    r"sobre|acerca|de|del|por|la|el|los|las|en|un|una)\b", re.IGNORECASE)
 
 
 class RuleBasedQueryParser:
@@ -66,13 +74,16 @@ class RuleBasedQueryParser:
     def parse(self, query: str, today: date) -> ParsedQuery:
         doc = self._model()(query)
         spans = []
-        speakers, groups = [], []
+        speakers, groups, constituencies = [], [], []
         for ent in doc.ents:
             if ent.label_ == "PER":
                 speakers.append(ent.text)
                 spans.append(ent.text)
             elif ent.label_ in ("ORG", "MISC"):
                 groups.append(ent.text)
+                spans.append(ent.text)
+            elif ent.label_ == "LOC" and self._is_constituency(query, ent):
+                constituencies.append(ent.text)
                 spans.append(ent.text)
 
         title = self._match(_TITLE_RE, query, spans)
@@ -85,11 +96,18 @@ class RuleBasedQueryParser:
             semantic_query=self._residual(query, spans),
             speakers=speakers or None,
             speaker_title=title,
+            constituencies=constituencies or None,
             groups_or_parties=groups or None,
             date_from=date_from,
             date_to=date_to,
             lang=lang,
             legislature=legislature)
+
+    @staticmethod
+    def _is_constituency(query, ent):
+        return bool(
+            _CONSTITUENCY_CUE_RE.search(query)
+            and _CONSTITUENCY_PREP_RE.search(query[:ent.start_char]))
 
     @staticmethod
     def _match(regex, query, spans, group=0):
