@@ -50,3 +50,18 @@ def test_gazetteer_tags_surname_the_model_misses():
     # An in-vocabulary common word offered to the gazetteer is filtered out, not tagged.
     only_common = create_ner_from_env(Settings(), gazetteer=["Madrid"])
     assert not any(s == "Madrid" for s in only_common.person_spans("Vivo en Madrid ahora."))
+
+
+def test_gazetteer_does_not_break_up_model_spans():
+    from qhld_ai.infrastructure.config.settings import Settings
+    from qhld_ai.infrastructure.ner.factory import create_ner_from_env
+
+    # "Reyes Maroto" (the ex-minister) must survive as the model's own span even
+    # with "Maroto" seeded (a deputy's distinctive second surname): the ruler runs
+    # after the model and never splits an existing entity into an orphan surname
+    # that would resolve to the wrong person.
+    text = "La exministra Reyes Maroto anunció ayer las ayudas al sector."
+    seeded = create_ner_from_env(Settings(), gazetteer=["Maroto"])
+    spans = seeded.person_spans(text)
+    assert "Reyes Maroto" in spans
+    assert "Maroto" not in spans

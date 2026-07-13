@@ -261,7 +261,7 @@ def test_match_person_empty_span_has_no_diagnostics():
 
 # --- surname gazetteer -----------------------------------------------------
 
-def test_gazetteer_keeps_distinctive_first_surnames_and_compound_parts():
+def test_gazetteer_keeps_distinctive_surnames_and_compound_parts():
     deputies = [
         FakeDeputy("g1", "Vallugera Balañà, Pilar"),
         FakeDeputy("g2", "Grande-Marlaska Gómez, Fernando"),
@@ -273,6 +273,37 @@ def test_gazetteer_keeps_distinctive_first_surnames_and_compound_parts():
     assert "Grande" in terms and "Marlaska" in terms  # hyphenated compound split
     assert "García" not in terms  # borne by two deputies → not distinctive
     assert all(t == t for t in terms) and terms == sorted(terms)
+
+
+def test_gazetteer_includes_distinctive_second_surnames():
+    # The chamber knows some deputies by the second surname: "Feijóo" must seed
+    # the gazetteer even though the first surname ("Núñez") is shared.
+    deputies = [
+        FakeDeputy("g1", "Núñez Feijóo, Alberto"),
+        FakeDeputy("g2", "Núñez González, Noelia"),
+        FakeDeputy("g3", "Muñoz de la Iglesia, Marta"),
+    ]
+    terms = build_surname_gazetteer(deputies)
+    assert "Feijóo" in terms
+    assert "Núñez" not in terms  # shared first surname stays out
+    assert "González" in terms and "Iglesia" in terms
+    # connective particles are never name surfaces
+    assert "de" not in terms and "la" not in terms and "del" not in terms
+
+
+def test_gazetteer_keeps_unique_first_surname_shared_as_second_surname():
+    # "Montero" is Montero Cuadrado's first surname and another deputy's second:
+    # a bare "Montero" still resolves to its first-surname bearer (_break_tie),
+    # so the token stays distinctive. A token shared as FIRST surname does not.
+    deputies = [
+        FakeDeputy("g1", "Montero Cuadrado, María Jesús"),
+        FakeDeputy("g2", "Gómez Montero, Luis"),
+        FakeDeputy("g3", "García López, Ana"),
+        FakeDeputy("g4", "García Ruiz, Juan"),
+    ]
+    terms = build_surname_gazetteer(deputies)
+    assert "Montero" in terms
+    assert "García" not in terms
 
 
 # --- non-deputy people (curated catalog + overrides) -----------------------

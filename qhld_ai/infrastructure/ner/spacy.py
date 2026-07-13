@@ -8,6 +8,16 @@ backfill run (``MentionTagger`` holds a single instance).
 
 We run NER only over the Spanish text block upstream, so a single Spanish model
 covers monolingual and co-official speeches alike.
+
+The optional gazetteer (distinctive deputy surnames) is applied as a
+``PhraseMatcher`` post-pass over the parsed doc, NOT as an entity-ruler pipe: a
+match is added only when its tokens fall outside every model PER span. Placed
+before the model, a single-token pattern would claim its token and stop the model
+from forming the fuller span around it ("Maroto" would break up "Reyes Maroto" —
+the ex-minister — and the orphan surname then resolves to whichever deputy
+carries it); placed after with no overwrites, it could not rescue the surnames
+the model tags with the WRONG label ("El señor Feijóo" as MISC). The post-pass
+does both: model PER spans always win, and everything else is fair game.
 """
 
 from qhld_ai.domain.ports.ner import NerPort
@@ -20,33 +30,42 @@ class SpacyNer(NerPort):
         self.settings = settings
         self._gazetteer = tuple(gazetteer or ())
         self._nlp = None
+        self._matcher = None
 
     def _model(self):
         if self._nlp is None:
             import spacy
 
             self._nlp = spacy.load(self.settings.ner_model)
-            if self._gazetteer:
-                # Only gazetteer surnames the model has NO representation for (out of
-                # vocabulary). In-vocabulary surfaces — common words the model won't tag
-                # as a person ("Madrid", "Torres") and common surnames it already knows
-                # — are left to its context-sensitive judgement; overriding them with a
-                # blunt rule tags every occurrence and wrecks precision.
-                terms = [t for t in self._gazetteer if self._nlp.vocab[t.lower()].is_oov]
-                if terms:
-                    # An entity ruler before the statistical NER; case-sensitive, so it
-                    # matches the Title-case name and supplements (not overrides) the model.
-                    ruler = self._nlp.add_pipe(
-                        "entity_ruler", before="ner", config={"overwrite_ents": False})
-                    ruler.add_patterns(
-                        [{"label": "PER", "pattern": term} for term in terms])
+            # Only gazetteer surnames the model has NO representation for (out of
+            # vocabulary). In-vocabulary surfaces — common words the model won't tag
+            # as a person ("Madrid", "Torres") and common surnames it already knows
+            # — are left to its context-sensitive judgement; overriding them with a
+            # blunt rule tags every occurrence and wrecks precision.
+            terms = [t for t in self._gazetteer if self._nlp.vocab[t.lower()].is_oov]
+            if terms:
+                from spacy.matcher import PhraseMatcher
+
+                # Default ORTH matching = case-sensitive, so only the Title-case
+                # name surface matches (names are Title-case in the Diario text).
+                self._matcher = PhraseMatcher(self._nlp.vocab)
+                self._matcher.add(
+                    "SURNAME", [self._nlp.make_doc(term) for term in terms])
         return self._nlp
 
     def person_spans(self, text: str) -> list[str]:
         if not text:
             return []
         doc = self._model()(text)
-        return [ent.text for ent in doc.ents if ent.label_ == "PER"]
+        spans = [(ent.start, ent.end, ent.text)
+                 for ent in doc.ents if ent.label_ == "PER"]
+        if self._matcher is not None:
+            per = [(start, end) for start, end, _ in spans]
+            for _, start, end in self._matcher(doc):
+                if not any(s < end and start < e for s, e in per):
+                    spans.append((start, end, doc[start:end].text))
+        spans.sort()
+        return [span_text for _, _, span_text in spans]
 
 
 @_register("spacy")

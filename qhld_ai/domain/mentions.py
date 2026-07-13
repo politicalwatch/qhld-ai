@@ -166,26 +166,51 @@ def build_person_index(deputies, extra=()) -> list[PersonEntry]:
     return build_deputy_index(deputies) + list(extra)
 
 
+# Connective particles inside a surname group ("Muñoz de la Iglesia", "Gil de
+# Biedma") — never a name surface on their own, so never gazetteer candidates.
+_SURNAME_PARTICLES = {
+    "de", "del", "la", "las", "los", "y", "e", "i", "da", "dos", "san", "santa"}
+
+
 def build_surname_gazetteer(deputies) -> list[str]:
-    """Distinctive first-surname surfaces (each borne by exactly one deputy) to seed an
-    NER gazetteer, so the model also tags the uncommon/compound surnames it otherwise
-    misses. Hyphenated compounds contribute each part ("Grande-Marlaska" → "Grande",
-    "Marlaska"). Surnames shared by several deputies are left out: the base model
-    usually catches common ones, and they would only add ambiguous spans the resolver
-    drops anyway. Original casing is kept (names are Title-case in the Diario text)."""
-    counts: Counter[str] = Counter()
+    """Distinctive surname surfaces to seed an NER gazetteer, so the model also tags
+    the uncommon/compound surnames it otherwise misses. The WHOLE surname group
+    contributes tokens — the chamber knows some deputies by their second surname
+    ("Feijóo", from "Núñez Feijóo") — and hyphenated compounds contribute each part
+    ("Grande-Marlaska" → "Grande", "Marlaska").
+
+    A token qualifies when a bare span of it resolves deterministically: either one
+    deputy bears it anywhere in the surname group, or exactly one bears it as the
+    FIRST surname (``_break_tie`` awards a bare surname to its first-surname bearer,
+    so "Montero" stays distinctive even when others carry it as a second surname).
+    Tokens ambiguous even then ("García") are left out: the base model usually
+    catches common ones, and they would only add spans the resolver drops anyway.
+    Original casing is kept (names are Title-case in the Diario text).
+
+    False-positive exposure stays low downstream: the spaCy adapter only turns
+    OUT-OF-VOCABULARY terms into entity-ruler patterns (a common word that doubles as
+    someone's surname is in-vocabulary and never gets a rule), the patterns are
+    case-sensitive, and the ruler never overrides the model's own entities."""
+    total: Counter[str] = Counter()
+    first: Counter[str] = Counter()
     surface: dict[str, str] = {}
+
+    def _tokens(text):
+        return {token for token in re.split(r"[-\s]+", text)
+                if len(token) >= _MIN_LEN
+                and token.lower() not in _SURNAME_PARTICLES}
+
     for deputy in deputies:
         name = getattr(deputy, "name", None)
         surname_part = name.partition(",")[0] if name else ""
-        if not surname_part.split():
-            continue
-        for token in re.split(r"[-\s]+", surname_part.split()[0]):
-            key = token.lower()
-            if len(key) >= _MIN_LEN:
-                counts[key] += 1
-                surface.setdefault(key, token)
-    return sorted(surface[key] for key, count in counts.items() if count == 1)
+        first_surname = surname_part.split()[0] if surname_part.split() else ""
+        for token in _tokens(surname_part):
+            total[token.lower()] += 1
+            surface.setdefault(token.lower(), token)
+        for token in _tokens(first_surname):
+            first[token.lower()] += 1
+    return sorted(surface[key] for key, count in total.items()
+                  if count == 1 or first[key] == 1)
 
 
 def normalize_span(span: str) -> str:
