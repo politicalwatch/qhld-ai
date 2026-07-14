@@ -15,6 +15,7 @@ import logging
 from dataclasses import dataclass, field
 
 from qhld_ai.application.search.resolve_entities import EntityResolver, Resolution
+from qhld_ai.domain.errors import NotASpeechQuery
 from qhld_ai.domain.ports.query_parser import ParsedQuery
 from qhld_ai.infrastructure.config.settings import get_settings
 from qhld_ai.infrastructure.queryparsing.factory import create_query_parser_from_env
@@ -74,6 +75,11 @@ class NaturalSearchSpeeches:
         lets a caller reuse a previous parse of the same query (the parse is an
         LLM call), skipping the parser entirely."""
         parsed = parsed or self.parser.parse(query, today)
+        if not parsed.is_speech_search:
+            # Not a search at all (a command, an injection, a question to the
+            # assistant): reject outright rather than retrieve on nonsense. The
+            # flag rides on the parsed object, so a reused parse is covered too.
+            raise NotASpeechQuery(query)
         resolution = self.resolver().resolve(parsed)
         # Unresolved values are the raw material for catalog curation (a missing
         # alias scores a near miss; an out-of-catalog person scores low), so keep
