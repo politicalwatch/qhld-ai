@@ -1,10 +1,15 @@
-"""spaCy NER adapter for mention extraction.
+"""spaCy NER adapter for mention and entity extraction.
 
 Loads ``es_core_news_lg`` (the same model the rule-based query parser uses) and
-returns every PER span. spaCy is lazy-imported and the model lazy-loaded on first
-use, so importing this module (and factory self-registration) stays cheap; the
-model is loaded once per adapter instance and reused across a whole extract/
-backfill run (``MentionTagger`` holds a single instance).
+returns PER spans (``person_spans``) or everything else (``entity_spans``).
+spaCy is lazy-imported and the model lazy-loaded on first use, so importing this
+module (and factory self-registration) stays cheap; the model is loaded once per
+adapter instance and reused across a whole extract/backfill run
+(``MentionTagger`` holds a single instance).
+
+The last parsed doc is memoized, so calling ``person_spans`` and
+``entity_spans`` back to back on the same text — as the tagger does per speech —
+costs a single parse.
 
 We run NER only over the Spanish text block upstream, so a single Spanish model
 covers monolingual and co-official speeches alike.
@@ -31,6 +36,7 @@ class SpacyNer(NerPort):
         self._gazetteer = tuple(gazetteer or ())
         self._nlp = None
         self._matcher = None
+        self._last = None  # (text, doc) memo — one entry, see _doc
 
     def _model(self):
         if self._nlp is None:
@@ -53,19 +59,43 @@ class SpacyNer(NerPort):
                     "SURNAME", [self._nlp.make_doc(term) for term in terms])
         return self._nlp
 
+    def _doc(self, text):
+        """Parse ``text``, reusing the previous doc when the text is unchanged:
+        the tagger asks for person and entity spans of the same speech text in a
+        row, and this makes that pair cost one parse."""
+        if self._last is None or self._last[0] != text:
+            self._last = (text, self._model()(text))
+        return self._last[1]
+
+    def _rescued(self, doc) -> list[tuple[int, int]]:
+        """Gazetteer matches outside every model PER span: surnames the model
+        missed or gave the wrong label. They count as person spans, so
+        ``person_spans`` adds them and ``entity_spans`` excludes them."""
+        if self._matcher is None:
+            return []
+        per = [(e.start, e.end) for e in doc.ents if e.label_ == "PER"]
+        return [(start, end) for _, start, end in self._matcher(doc)
+                if not any(s < end and start < e for s, e in per)]
+
     def person_spans(self, text: str) -> list[str]:
         if not text:
             return []
-        doc = self._model()(text)
+        doc = self._doc(text)
         spans = [(ent.start, ent.end, ent.text)
                  for ent in doc.ents if ent.label_ == "PER"]
-        if self._matcher is not None:
-            per = [(start, end) for start, end, _ in spans]
-            for _, start, end in self._matcher(doc):
-                if not any(s < end and start < e for s, e in per):
-                    spans.append((start, end, doc[start:end].text))
+        spans.extend(
+            (start, end, doc[start:end].text) for start, end in self._rescued(doc))
         spans.sort()
         return [span_text for _, _, span_text in spans]
+
+    def entity_spans(self, text: str) -> list[str]:
+        if not text:
+            return []
+        doc = self._doc(text)
+        rescued = self._rescued(doc)
+        return [ent.text for ent in doc.ents
+                if ent.label_ != "PER"
+                and not any(s < ent.end and ent.start < e for s, e in rescued)]
 
 
 @_register("spacy")

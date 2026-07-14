@@ -141,6 +141,30 @@ def test_distinct_values_empty_collection(adapter):
     assert adapter.distinct_values("c", "speech_id") == set()
 
 
+def test_distinct_values_flattens_list_payloads(adapter):
+    # A list-valued key (entities, mentions) yields the member vocabulary.
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [
+        _point({"speech_id": "a", "entities": ["eurovision", "guerra de gaza"]}),
+        _point({"speech_id": "b", "entities": ["eurovision"]}),
+        _point({"speech_id": "c", "entities": []}),
+    ])
+    assert adapter.distinct_values("c", "entities") == {"eurovision", "guerra de gaza"}
+
+
+def test_search_scalar_filter_matches_list_payload_membership(adapter):
+    # The entities filter in its most common shape: one key against the
+    # speech-level list payload.
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [
+        _point({"speech_id": "euro", "entities": ["eurovision", "rtve"]}),
+        _point({"speech_id": "gaza", "entities": ["guerra de gaza"]}),
+        _point({"speech_id": "none", "entities": []}),
+    ])
+    hits = adapter.search("c", [0.1, 0.2, 0.3], k=5, filters={"entities": "eurovision"})
+    assert [h.payload["speech_id"] for h in hits] == ["euro"]
+
+
 def test_search_grouped_returns_speeches_with_capped_highlights(adapter):
     adapter.ensure_collection("c", 3)
     adapter.upsert("c", [

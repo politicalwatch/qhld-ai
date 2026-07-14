@@ -136,7 +136,13 @@ class QdrantAdapter(VectorStorePort):
             ))
             for record in records:
                 if record.payload and key in record.payload:
-                    values.add(record.payload[key])
+                    value = record.payload[key]
+                    # A list-valued key (entities, mentions) contributes its
+                    # members: the distinct vocabulary, not distinct lists.
+                    if isinstance(value, list):
+                        values.update(value)
+                    else:
+                        values.add(value)
             if offset is None:
                 break
         return values

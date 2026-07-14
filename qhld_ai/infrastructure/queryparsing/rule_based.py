@@ -7,8 +7,10 @@ light regex for titles/languages/legislature + a
 relative-date regex backed by ``dateparser`` for absolute dates. It is
 deliberately *not* a re-implementation of the LLM's reasoning — it shows where an
 off-the-shelf rule/NER stack trails a structured-output LLM: it cannot tell a
-speaker from a merely-mentioned person, cannot classify a title vs a name, and
-``dateparser`` misses most Spanish relative *ranges* ("los últimos tres meses").
+speaker from a merely-mentioned person, cannot classify a title vs a name, cannot
+tell a party ORG from a topic entity ("PSOE" vs "Eurovisión" — both land in
+groups/parties, so it never fills ``entities``), and ``dateparser`` misses most
+Spanish relative *ranges* ("los últimos tres meses").
 
 spaCy/dateparser are lazy-imported so this module stays importable (and the
 factory registration stays cheap) even when they are not installed; only ``parse``

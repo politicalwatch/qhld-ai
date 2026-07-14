@@ -17,6 +17,9 @@ CORPUS = {
     # article, bilingual "/", abbreviation, plain.
     "constituency": {"Málaga", "Cádiz", "Coruña (A)", "Rioja (La)", "Balears (Illes)",
                      "Alicante/Alacant", "S/C Tenerife", "Lleida", None},
+    # Canonical keys as stamped by aggregate_entities at index time.
+    "entities": {"eurovision", "festival de eurovision", "guerra de gaza",
+                 "ucrania", "navantia", "ley de amnistia", None},
 }
 
 GROUPS = [
@@ -329,6 +332,73 @@ def test_wholly_unresolved_mentions_in_any_mode_block(resolver):
         semantic_query="x", mentioned_persons=["Winston Churchill", "Napoleón"],
         mentions_mode="any"))
     assert "mentions" not in r.filters
+    assert r.blocked
+
+
+def test_entity_resolves_to_canonical_key(resolver):
+    r = resolver.resolve(ParsedQuery(semantic_query="Eurovisión", entities=["Eurovisión"]))
+    assert r.filters["entities"] == "eurovision"
+    assert any("entities: 'Eurovisión' → 'eurovision'" in note for note in r.notes)
+
+
+def test_entity_normalization_strips_leading_article(resolver):
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="la guerra de Gaza", entities=["la guerra de Gaza"]))
+    assert r.filters["entities"] == "guerra de gaza"
+
+
+def test_entity_fuzzy_fallback_absorbs_particle_drift(resolver):
+    # "guerra en Gaza" normalizes to a key absent from the vocabulary; the fuzzy
+    # fallback still lands on the corpus key.
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="guerra en Gaza", entities=["guerra en Gaza"]))
+    assert r.filters["entities"] == "guerra de gaza"
+
+
+def test_multiple_entities_default_to_requiring_all(resolver):
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="Gaza y Ucrania", entities=["Gaza", "Ucrania"]))
+    assert r.filters["entities"] == {"all": ["guerra de gaza", "ucrania"]}
+
+
+def test_multiple_entities_any_mode_becomes_a_list(resolver):
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="Gaza o Ucrania", entities=["Gaza", "Ucrania"],
+        entities_mode="any"))
+    assert r.filters["entities"] == ["guerra de gaza", "ucrania"]
+
+
+def test_unresolvable_entity_blocks_with_suggestion(resolver):
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="cumbre del clima", entities=["cumbre del clima"]))
+    assert "entities" not in r.filters
+    assert r.blocked
+    entity = r.unresolved[0]
+    assert (entity.field, entity.value, entity.blocking) == (
+        "entities", "cumbre del clima", True)
+
+
+def test_partially_resolved_entities_in_any_mode_keep_the_resolved_one(resolver):
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="x", entities=["Navantia", "cumbre del clima"],
+        entities_mode="any"))
+    assert r.filters["entities"] == "navantia"
+    assert not r.blocked
+    assert [(e.field, e.blocking) for e in r.unresolved] == [("entities", False)]
+
+
+def test_partially_resolved_entities_in_all_mode_block(resolver):
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="x", entities=["Navantia", "cumbre del clima"]))
+    assert "entities" not in r.filters
+    assert r.blocked
+
+
+def test_furniture_entity_blocks(resolver):
+    # "el Gobierno" normalizes to "" (stoplist): unsatisfiable rather than a
+    # filter that would match every speech.
+    r = resolver.resolve(ParsedQuery(semantic_query="x", entities=["el Gobierno"]))
+    assert "entities" not in r.filters
     assert r.blocked
 
 

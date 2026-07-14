@@ -37,6 +37,20 @@ no pide personas mencionadas.
 aparecer todas (conjunción 'y'/'e', o una sola persona: 'que mencionen a Ayuso y \
 Putin' → 'all'); 'any' si basta con una (disyunción 'o'/'u': 'que mencionen a \
 Ayuso o Putin' → 'any').
+- entities: TODAS las entidades nombradas NO personales a las que la intervención \
+debe referirse explícitamente — una cosa concreta con nombre propio a la que el \
+tema está anclado: una organización ('Navantia', 'la UNRWA'), un evento \
+('Eurovisión'), una ley ('la ley de amnistía'), un conflicto ('la guerra de \
+Gaza'), un lugar del que TRATA la intervención ('sobre la sequía en Málaga' → \
+['Málaga']). Un elemento por entidad, tal como aparece. NO son entidades los \
+partidos o grupos (van en groups_or_parties), ni las personas (speakers / \
+mentioned_persons), ni la provincia de elección de los diputados \
+(constituencies). La entidad se mantiene TAMBIÉN dentro de semantic_query: es el \
+tema. Null si el tema no nombra ninguna entidad concreta (un tema de nombre \
+común como 'vivienda pública' no es una entidad).
+- entities_mode: cómo combinar varias entidades: 'all' si deben aparecer todas \
+(conjunción 'y'/'e', o una sola entidad); 'any' si basta con una (disyunción \
+'o'/'u').
 - speaker_title: el cargo del orador cuando se le nombra por su cargo en lugar de \
 por su nombre (p. ej. 'ministra de economía'). El término genérico \
 'diputados'/'diputadas' NO es un cargo. Null en otro caso.

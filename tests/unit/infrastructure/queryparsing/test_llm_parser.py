@@ -64,6 +64,16 @@ def test_parse_binds_schema_and_returns_structured_result(fake_llm):
     assert result.speakers == ["Montero"]
 
 
+def test_schema_extracts_entities_with_default_all_mode(fake_llm):
+    # The bound schema is the extraction spec: the entity filter fields must be
+    # part of it, defaulting to conjunctive combination.
+    parser = LLMQueryParser(Settings(_env_file=None))
+    parser.parse("Eurovisión y Gaza", date(2025, 7, 3))
+    schema = fake_llm["schema"]
+    assert "entities" in schema.model_fields
+    assert schema.model_fields["entities_mode"].default == "all"
+
+
 def test_parse_injects_today_into_system_prompt(fake_llm):
     parser = LLMQueryParser(Settings(_env_file=None))
     parser.parse("algo del último año", date(2025, 7, 3))

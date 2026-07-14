@@ -16,6 +16,12 @@ service maps that onto what the index actually *stores*:
 - mentioned persons -> person ids (deputies, or non-deputies such as ministers, the
   King, regional presidents or foreign leaders), matched against the SAME person
   catalog that tags the corpus, then filtered on the payload ``mentions`` list.
+- entities      -> canonical entity keys, matched against the payload ``entities``
+  vocabulary (the speech-level non-person entities stamped at index time). The query
+  value is normalized with the SAME ``normalize_entity`` that produced the payload
+  keys, so an exact key hit is the common case; a fuzzy fallback absorbs particle
+  drift ("guerra en Gaza" -> "guerra de gaza"). Combination honours the parsed
+  ``entities_mode`` exactly like mentions.
 - constituencies -> the payload ``constituency`` official province value (as recorded
   in the deputy catalog: "Coruña (A)", "Alicante/Alacant"). The parser already
   canonicalizes demonyms to a province proper name; here the user-facing spelling is
@@ -53,6 +59,7 @@ from pathlib import Path
 from thefuzz import fuzz, process
 
 from qhld_ai.application.persons_catalog import load_person_index
+from qhld_ai.domain.entities import normalize_entity
 from qhld_ai.domain.ports.query_parser import ParsedQuery
 from qhld_ai.domain.mentions import PersonMatch, match_person
 
@@ -65,6 +72,10 @@ _GROUP_THRESHOLD = 80
 # High enough to keep provinces apart (they share few tokens), low enough for
 # spelling drift the alias keys don't cover ("Baleares" vs the official "Balears").
 _CONSTITUENCY_THRESHOLD = 85
+# Entity keys usually hit exactly (query and payload share normalize_entity);
+# the fuzzy fallback only needs to absorb particle drift ("guerra en Gaza" vs
+# "guerra de gaza"), which token_set_ratio scores ~100.
+_ENTITY_THRESHOLD = 90
 
 # Map the many ways a language can be named (or mis-coded by an LLM: "Gallego",
 # "cat") to the ISO code stored in the payload ``lang``. Payload uses es/ca/gl/eu.
@@ -168,6 +179,8 @@ class EntityResolver:
             self._resolve_role(result, parsed.speaker_title)
         if parsed.mentioned_persons:
             self._resolve_mentions(result, parsed.mentioned_persons, parsed.mentions_mode)
+        if parsed.entities:
+            self._resolve_entities(result, parsed.entities, parsed.entities_mode)
         if parsed.constituencies:
             self._resolve_constituencies(result, parsed.constituencies)
         if parsed.groups_or_parties:
@@ -236,6 +249,49 @@ class EntityResolver:
             result.filters["mentions"] = sorted(ids)
         else:
             result.filters["mentions"] = {"all": sorted(ids)}
+
+    def _resolve_entities(self, result, raws, mode):
+        vocab = {v for v in self._distinct("entities") if v}
+        keys, misses = [], []
+        for raw in raws:
+            key, suggestion = self._match_entity(raw, vocab)
+            if key:
+                result.notes.append(f"entities: '{raw}' → '{key}'")
+                if key not in keys:
+                    keys.append(key)
+            else:
+                misses.append((raw, suggestion))
+        # Same combination semantics as mentions: in ``all`` mode one miss makes
+        # the query unsatisfiable; ``any`` survives on the resolved subset.
+        blocking = bool(misses) if mode != "any" else not keys
+        for raw, suggestion in misses:
+            _record_unresolved(result, "entities", raw, blocking=blocking,
+                               suggestion=suggestion)
+        if blocking or not keys:
+            return
+        if len(keys) == 1:
+            result.filters["entities"] = keys[0]
+        elif mode == "any":
+            result.filters["entities"] = sorted(keys)
+        else:
+            result.filters["entities"] = {"all": sorted(keys)}
+
+    @staticmethod
+    def _match_entity(raw, vocab):
+        """Canonical corpus key for one query entity: normalize with the shared
+        function (exact hits are the common case, both sides run it), fuzzy
+        fallback for particle drift. ``(None, suggestion)`` when nothing clears
+        the threshold — the constraint is unsatisfiable."""
+        key = normalize_entity(raw)
+        if not key:
+            return None, None
+        if key in vocab:
+            return key, None
+        match = process.extractOne(
+            key, list(vocab), scorer=fuzz.token_set_ratio) if vocab else None
+        if match and match[1] >= _ENTITY_THRESHOLD:
+            return match[0], None
+        return None, (f"'{match[0]}' ({match[1]})" if match else None)
 
     def _person_suggestion(self, match: PersonMatch) -> str | None:
         """Human-readable hint for a failed person match: the tied names when the

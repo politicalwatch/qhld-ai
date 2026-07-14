@@ -42,6 +42,26 @@ class ParsedQuery(BaseModel):
             "How multiple mentioned persons combine: 'all' when the speech must "
             "mention every one of them (connective 'y'/'e', or a single person), "
             "'any' when mentioning one suffices (connective 'o'/'u')."))
+    entities: list[str] | None = Field(
+        default=None,
+        description=(
+            "Every non-person NAMED entity the speech must explicitly reference — "
+            "a concrete proper-named thing the topic is pinned to: an organization "
+            "('Navantia', 'UNRWA'), an event ('Eurovisión'), a law ('la ley de "
+            "amnistía'), a conflict ('la guerra de Gaza'), a place the speech is "
+            "ABOUT ('sobre la sequía en Málaga' → ['Málaga']). One list item per "
+            "entity, verbatim. NOT political parties or groups (those go in "
+            "groups_or_parties), NOT persons (speakers / mentioned_persons), NOT a "
+            "province filtering deputies by election (constituencies). The entity "
+            "also STAYS inside semantic_query — it IS the topic. Null when the "
+            "topic names no concrete entity (a common-noun topic like 'vivienda "
+            "pública' is not an entity)."))
+    entities_mode: Literal["all", "any"] = Field(
+        default="all",
+        description=(
+            "How multiple entities combine: 'all' when the speech must reference "
+            "every one of them (connective 'y'/'e', or a single entity), 'any' "
+            "when referencing one suffices (connective 'o'/'u')."))
     speaker_title: str | None = Field(
         default=None,
         description=(

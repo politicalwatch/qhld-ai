@@ -52,6 +52,57 @@ def test_gazetteer_tags_surname_the_model_misses():
     assert not any(s == "Madrid" for s in only_common.person_spans("Vivo en Madrid ahora."))
 
 
+def test_entity_spans_extracts_non_persons_only():
+    from qhld_ai.infrastructure.config.settings import Settings
+    from qhld_ai.infrastructure.ner.factory import create_ner_from_env
+
+    ner = create_ner_from_env(Settings())
+    text = ("Pedro Sánchez defendió la participación de España en Eurovisión "
+            "pese a la guerra de Gaza.")
+    spans = ner.entity_spans(text)
+    assert any("Eurovisión" in s for s in spans)
+    assert any("Gaza" in s for s in spans)
+    assert not any("Sánchez" in s for s in spans)
+    assert ner.entity_spans("") == []
+
+
+def test_entity_spans_excludes_gazetteer_rescued_surnames():
+    from qhld_ai.infrastructure.config.settings import Settings
+    from qhld_ai.infrastructure.ner.factory import create_ner_from_env
+
+    # An out-of-vocabulary surname the model mislabels is rescued as a PERSON by
+    # the gazetteer post-pass, so it must not leak into the entity pool.
+    text = "La señora Vallugera habló sobre Eurovisión."
+    seeded = create_ner_from_env(Settings(), gazetteer=["Vallugera"])
+    assert any("Vallugera" in s for s in seeded.person_spans(text))
+    entity_spans = seeded.entity_spans(text)
+    assert not any("Vallugera" in s for s in entity_spans)
+    assert any("Eurovisión" in s for s in entity_spans)
+
+
+def test_person_and_entity_spans_share_one_parse():
+    from qhld_ai.infrastructure.config.settings import Settings
+    from qhld_ai.infrastructure.ner.factory import create_ner_from_env
+
+    ner = create_ner_from_env(Settings())
+    text = "Pedro Sánchez habló de Eurovisión."
+    ner.person_spans(text)
+    parses = 0
+    real_model = ner._model()
+
+    class _CountingModel:
+        def __call__(self, value):
+            nonlocal parses
+            parses += 1
+            return real_model(value)
+
+    ner._nlp = _CountingModel()
+    ner.entity_spans(text)      # same text -> memo hit, no new parse
+    assert parses == 0
+    ner.entity_spans("Otro texto sobre la OTAN.")   # new text -> one parse
+    assert parses == 1
+
+
 def test_gazetteer_does_not_break_up_model_spans():
     from qhld_ai.infrastructure.config.settings import Settings
     from qhld_ai.infrastructure.ner.factory import create_ner_from_env
