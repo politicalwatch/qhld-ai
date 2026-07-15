@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     reranker_provider: str = "noop"
     reranker_model: str = ""
     reranker_top_n: int = 50
+    # Relevance floor on the reranked score: results below it are dropped, so an
+    # off-domain or nonsensical query returns nothing rather than the top-k
+    # least-irrelevant passages (bi-encoder cosine / RRF scores don't separate
+    # in-domain from off-domain, but the cross-encoder does). Only applied on the
+    # reranked path, and only for topical queries — natural search skips it for
+    # pure-entity and pure-filter queries, where valid brief-mention hits
+    # legitimately score as low as junk. 0.0 disables it, keeping the bi-encoder
+    # baseline untouched. Calibrated to the reranker model's raw scores —
+    # re-check if the model changes.
+    reranker_score_floor: float = 0.0
 
     # Sparse lexical embeddings (hybrid retrieval). "none" keeps pure dense
     # retrieval — existing collections and search behavior untouched. When set

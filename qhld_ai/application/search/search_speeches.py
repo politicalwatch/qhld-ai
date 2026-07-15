@@ -53,7 +53,7 @@ class SearchSpeeches:
             return {}
         return {"sparse_vector": self.sparse_embedder.embed_query(query)}
 
-    def search(self, query, k=10, filters=None) -> list[SearchHit]:
+    def search(self, query, k=10, filters=None, apply_floor=True) -> list[SearchHit]:
         vector = self.embedder.embed_query(query)
         # The query vector's length is the model dimension, which is part of the
         # per-model collection name — no separate probe needed.
@@ -65,10 +65,11 @@ class SearchSpeeches:
         # Over-fetch a wide candidate pool for the cross-encoder to reorder.
         fetch = max(k, self.settings.reranker_top_n)
         hits = self.store.search(collection, vector, fetch, clean or None, **extra)
-        return self.reranker.rerank(query, hits, k)
+        return self._above_floor(self.reranker.rerank(query, hits, k), apply_floor)
 
     def search_grouped(
-        self, query, page_size=10, highlights=3, filters=None, exclude=None
+        self, query, page_size=10, highlights=3, filters=None, exclude=None,
+        apply_floor=True,
     ) -> list[SpeechGroup]:
         """Speech-level results: ``page_size`` distinct speeches, each with up to
         ``highlights`` matching passages. Pagination is stateless — the caller
@@ -108,4 +109,20 @@ class SearchSpeeches:
             score = top[0].score if top else group.score
             reranked.append(SpeechGroup(speech_id=group.speech_id, score=score, highlights=top))
         reranked.sort(key=lambda group: group.score, reverse=True)
-        return reranked[:page_size]
+        return self._above_floor(reranked, apply_floor)[:page_size]
+
+    def _above_floor(self, items, apply_floor):
+        """Drop reranked hits/groups scoring below the relevance floor. Only the
+        reranked path calls this: cross-encoder scores separate in-domain from
+        off-domain, so a floor here turns a nonsensical query into zero results
+        instead of the top-k least-irrelevant passages. Callers pass
+        ``apply_floor=False`` for pure-entity queries: a speech that merely
+        mentions the entity in passing is a valid hit yet reranks as low as junk
+        (the passage is about something else), so no floor value can separate the
+        two — precision comes from the entity filter there instead. A floor of
+        0.0 (the default) is a no-op, so the bi-encoder baseline stays
+        byte-identical."""
+        floor = self.settings.reranker_score_floor
+        if not apply_floor or not floor:
+            return items
+        return [item for item in items if item.score >= floor]

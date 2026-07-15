@@ -141,6 +141,106 @@ def test_reranker_none_by_default_keeps_baseline():
     assert service.reranker is None           # noop provider => no reranking
 
 
+class _ScoringReranker:
+    """Returns hits with fixed reranked scores (already sorted desc)."""
+
+    def __init__(self, scores):
+        self.scores = scores
+
+    def rerank(self, query, hits, k):
+        out = [SearchHit(id=f"r{i}", score=s, payload={"text": "t"})
+               for i, s in enumerate(self.scores)]
+        return out[:k]
+
+
+def test_reranker_score_floor_drops_low_scoring_hits():
+    # An off-domain query's reranked scores fall below the floor → those hits are
+    # dropped rather than returned as top-k least-irrelevant passages.
+    store = _WideStore([SearchHit(id=f"p{i}", score=0.5, payload={"text": "t"})
+                        for i in range(6)])
+    reranker = _ScoringReranker([0.9, 0.2, 0.05])
+    service = SearchSpeeches(
+        settings=_settings(reranker_score_floor=0.15), embedder=_FakeEmbedder(),
+        store=store, reranker=reranker)
+
+    hits = service.search("q", k=3)
+
+    assert [round(h.score, 2) for h in hits] == [0.9, 0.2]  # 0.05 dropped
+
+
+def test_apply_floor_false_exempts_low_scoring_hits():
+    # Entity-anchored queries pass apply_floor=False: a brief-mention hit reranks
+    # as low as junk but is a valid result, so the floor must not drop it.
+    store = _WideStore([SearchHit(id=f"p{i}", score=0.5, payload={"text": "t"})
+                        for i in range(6)])
+    reranker = _ScoringReranker([0.9, 0.2, 0.05])
+    service = SearchSpeeches(
+        settings=_settings(reranker_score_floor=0.15), embedder=_FakeEmbedder(),
+        store=store, reranker=reranker)
+
+    hits = service.search("q", k=3, apply_floor=False)
+
+    assert [round(h.score, 2) for h in hits] == [0.9, 0.2, 0.05]  # nothing dropped
+
+
+def test_reranker_score_floor_zero_keeps_every_hit():
+    store = _WideStore([SearchHit(id=f"p{i}", score=0.5, payload={"text": "t"})
+                        for i in range(6)])
+    reranker = _ScoringReranker([0.9, 0.2, 0.05])
+    service = SearchSpeeches(  # default floor 0.0 => no-op
+        settings=_settings(), embedder=_FakeEmbedder(), store=store, reranker=reranker)
+
+    assert len(service.search("q", k=3)) == 3
+
+
+def test_reranker_score_floor_drops_low_scoring_groups():
+    hi_a = [SearchHit(id="a1", score=0.5, payload={"text": "x"})]
+    hi_b = [SearchHit(id="b1", score=0.5, payload={"text": "z"})]
+
+    class _Store:
+        def search_grouped(self, name, vector, group_by, limit, group_size,
+                           filters=None, exclude=None):
+            return [SpeechGroup(speech_id="A", score=0.5, highlights=hi_a),
+                    SpeechGroup(speech_id="B", score=0.5, highlights=hi_b)]
+
+    class _Rr:
+        def rerank(self, query, hits, k):
+            score = 0.9 if hits[0].id == "a1" else 0.05
+            return [SearchHit(id=hits[0].id, score=score, payload=hits[0].payload)]
+
+    service = SearchSpeeches(
+        settings=_settings(reranker_score_floor=0.15), embedder=_FakeEmbedder(),
+        store=_Store(), reranker=_Rr())
+
+    groups = service.search_grouped("q", page_size=5, highlights=1)
+
+    assert [g.speech_id for g in groups] == ["A"]  # B (0.05) dropped by the floor
+
+
+def test_apply_floor_false_exempts_low_scoring_groups():
+    hi_a = [SearchHit(id="a1", score=0.5, payload={"text": "x"})]
+    hi_b = [SearchHit(id="b1", score=0.5, payload={"text": "z"})]
+
+    class _Store:
+        def search_grouped(self, name, vector, group_by, limit, group_size,
+                           filters=None, exclude=None):
+            return [SpeechGroup(speech_id="A", score=0.5, highlights=hi_a),
+                    SpeechGroup(speech_id="B", score=0.5, highlights=hi_b)]
+
+    class _Rr:
+        def rerank(self, query, hits, k):
+            score = 0.9 if hits[0].id == "a1" else 0.05
+            return [SearchHit(id=hits[0].id, score=score, payload=hits[0].payload)]
+
+    service = SearchSpeeches(
+        settings=_settings(reranker_score_floor=0.15), embedder=_FakeEmbedder(),
+        store=_Store(), reranker=_Rr())
+
+    groups = service.search_grouped("q", page_size=5, highlights=1, apply_floor=False)
+
+    assert [g.speech_id for g in groups] == ["A", "B"]  # B kept despite 0.05
+
+
 # --- Hybrid (dense + sparse) search -----------------------------------------
 
 _SPARSE = SparseVector(indices=[7], values=[1.0])

@@ -15,6 +15,7 @@ import logging
 from dataclasses import dataclass, field
 
 from qhld_ai.application.search.resolve_entities import EntityResolver, Resolution
+from qhld_ai.domain.entities import normalize_entity
 from qhld_ai.domain.errors import NotASpeechQuery
 from qhld_ai.domain.ports.query_parser import ParsedQuery
 from qhld_ai.infrastructure.config.settings import get_settings
@@ -22,6 +23,28 @@ from qhld_ai.infrastructure.queryparsing.factory import create_query_parser_from
 from qhld_ai.infrastructure.vectorstore.naming import collection_name
 
 logger = logging.getLogger(__name__)
+
+# Function words that connect entities inside a semantic query ("Navantia y
+# UNRWA", "sequía en Málaga") without adding topical content of their own.
+_CONNECTOR_TOKENS = {
+    "el", "la", "los", "las", "un", "una", "unos", "unas",
+    "a", "al", "de", "del", "en", "y", "e", "o", "u",
+    "sobre", "con", "por", "para",
+}
+
+
+def _entities_cover_topic(semantic: str, entities: list[str]) -> bool:
+    """True when the semantic query adds nothing beyond the extracted entities —
+    a PURE-entity query ("Eurovisión", "la guerra de Gaza"). The parser keeps
+    entities inside ``semantic_query`` (the entity IS the topic), so comparing
+    their normalized tokens tells the two query shapes apart: a leftover
+    content token means the query asks something ABOUT the entity ("sequía en
+    Málaga" leaves "sequía") and is topical."""
+    entity_tokens = set()
+    for raw in entities:
+        entity_tokens.update(normalize_entity(raw).split())
+    semantic_tokens = set(normalize_entity(semantic).split())
+    return not (semantic_tokens - entity_tokens - _CONNECTOR_TOKENS)
 
 
 @dataclass
@@ -92,6 +115,20 @@ class NaturalSearchSpeeches:
         # Search the topic only. If the query was pure-filter (no topic), fall back
         # to the full text so there is still a vector to rank the filtered set by.
         semantic = parsed.semantic_query.strip() if parsed.semantic_query else ""
+        # The relevance floor only makes sense for topical queries, where a low
+        # reranked score means off-domain. Skip it for PURE-entity queries — the
+        # semantic query is just the entity, so a speech referencing it only in
+        # passing is a valid hit yet scores as low as junk; the entity filter
+        # provides the precision there. Everything else keeps the floor: with a
+        # topic beyond the entity ("sequía en Málaga"), a valid hit must discuss
+        # that topic and its best passage scores well, while entity-filtered hits
+        # about something else are junk. Speakers and mentioned persons never
+        # exempt — they are stripped OUT of the semantic query, so any residual
+        # topic is a genuine requirement ("vivienda que mencione a X" must be
+        # about vivienda). Also skip on pure-filter queries: the searched text
+        # falls back to the raw query, which the corpus passages never resemble.
+        pure_entity = bool(parsed.entities) and _entities_cover_topic(semantic, parsed.entities)
+        apply_floor = bool(semantic) and not pure_entity
         semantic = semantic or query
         if resolution.blocked:
             # Some filter is unsatisfiable (e.g. a mentioned person absent from the
@@ -103,9 +140,10 @@ class NaturalSearchSpeeches:
         if grouped:
             hits = self.search.search_grouped(
                 semantic, page_size=k, highlights=highlights, filters=filters,
-                exclude=exclude)
+                exclude=exclude, apply_floor=apply_floor)
         else:
-            hits = self.search.search(semantic, k=k, filters=filters)
+            hits = self.search.search(
+                semantic, k=k, filters=filters, apply_floor=apply_floor)
         return NaturalResult(
             parsed=parsed, resolution=resolution, semantic_query=semantic,
             hits=hits, grouped=grouped)

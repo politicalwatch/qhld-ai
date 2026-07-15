@@ -34,14 +34,17 @@ class _StubResolver:
 class _SpySearch:
     def __init__(self):
         self.calls = []
+        self.floors = []   # apply_floor of each call, parallel to ``calls``
 
-    def search(self, query, k=10, filters=None):
+    def search(self, query, k=10, filters=None, apply_floor=True):
         self.calls.append(("search", query, k, filters))
+        self.floors.append(apply_floor)
         return ["hit"]
 
     def search_grouped(self, query, page_size=10, highlights=3, filters=None,
-                       exclude=None):
+                       exclude=None, apply_floor=True):
         self.calls.append(("grouped", query, page_size, highlights, filters, exclude))
+        self.floors.append(apply_floor)
         return ["group"]
 
 
@@ -159,6 +162,107 @@ def test_nonblocking_unresolved_still_searches():
     result = service.execute("pensiones", today=date(2025, 7, 3))
     assert result.hits == ["hit"]
     assert service.search.calls[0][3] == {"speaker": "Abascal Conde, Santiago"}
+
+
+# --- Relevance-floor gating by query type ------------------------------------
+# The floor only means "off-domain" on topical queries. PURE-entity queries are
+# exempt (the semantic query is just the entity, so a valid brief-mention hit
+# reranks as low as junk), and so are pure-filter queries (they score against
+# fallback text). Everything else keeps the floor — a topic beyond the entity
+# ("sequía en Málaga") is a genuine requirement, and speaker/mention filters
+# never exempt since those persons are stripped out of the semantic query.
+
+
+def test_topical_query_applies_the_floor():
+    service = _service(ParsedQuery(semantic_query="financiación autonómica"), Resolution())
+    service.execute("financiación autonómica", today=date(2025, 7, 3))
+    assert service.search.floors == [True]
+
+
+def test_topical_query_with_speaker_filter_still_applies_the_floor():
+    # Metadata filters (speaker, group, province, dates) don't change the query's
+    # topical nature — the reranked score still measures topic relevance.
+    parsed = ParsedQuery(semantic_query="vivienda", speakers=["Montero"])
+    resolution = Resolution(filters={"speaker": "Montero Cuadrado, María Jesús"})
+    service = _service(parsed, resolution)
+    service.execute("qué dice Montero sobre vivienda", today=date(2025, 7, 3))
+    assert service.search.floors == [True]
+
+
+def test_pure_entity_query_skips_the_floor():
+    parsed = ParsedQuery(semantic_query="Eurovisión", entities=["Eurovisión"])
+    resolution = Resolution(filters={"entities": "eurovision"})
+    service = _service(parsed, resolution)
+    service.execute("intervenciones sobre Eurovisión", today=date(2025, 7, 3))
+    assert service.search.floors == [False]
+
+
+def test_entity_plus_topic_query_applies_the_floor():
+    # "sequía" is topical content beyond the entity: a Málaga-referencing speech
+    # about something else is junk for this query, so the floor must run.
+    parsed = ParsedQuery(semantic_query="sequía en Málaga", entities=["Málaga"])
+    resolution = Resolution(filters={"entities": "malaga"})
+    service = _service(parsed, resolution)
+    service.execute("intervenciones sobre la sequía en Málaga", today=date(2025, 7, 3))
+    assert service.search.floors == [True]
+
+
+def test_pure_entity_detection_survives_particle_drift():
+    # Leading-article drift between the semantic query and the entity span must
+    # not misclassify a pure-entity query as topical.
+    parsed = ParsedQuery(semantic_query="guerra de Gaza", entities=["la guerra de Gaza"])
+    resolution = Resolution(filters={"entities": "guerra de gaza"})
+    service = _service(parsed, resolution)
+    service.execute("intervenciones sobre la guerra de Gaza", today=date(2025, 7, 3))
+    assert service.search.floors == [False]
+
+
+def test_multiple_entities_joined_by_connector_stay_pure():
+    parsed = ParsedQuery(semantic_query="Navantia y UNRWA",
+                         entities=["Navantia", "UNRWA"], entities_mode="all")
+    resolution = Resolution(filters={"entities": {"all": ["navantia", "unrwa"]}})
+    service = _service(parsed, resolution)
+    service.execute("intervenciones sobre Navantia y UNRWA", today=date(2025, 7, 3))
+    assert service.search.floors == [False]
+
+
+def test_mentioned_person_query_with_topic_still_applies_the_floor():
+    # The person is stripped from the semantic query, so "vivienda" is a real
+    # topical requirement — a mentioning speech about something else is junk.
+    parsed = ParsedQuery(semantic_query="vivienda", mentioned_persons=["Zapatero"])
+    resolution = Resolution(filters={"mentions": "dep-zapatero"})
+    service = _service(parsed, resolution)
+    service.execute("vivienda que mencionen a Zapatero", today=date(2025, 7, 3))
+    assert service.search.floors == [True]
+
+
+def test_pure_mention_query_skips_the_floor_via_empty_topic():
+    # No residual topic: brief mentions are exactly what the user asked for.
+    parsed = ParsedQuery(semantic_query="", mentioned_persons=["Zapatero"])
+    resolution = Resolution(filters={"mentions": "dep-zapatero"})
+    service = _service(parsed, resolution)
+    service.execute("intervenciones que mencionen a Zapatero", today=date(2025, 7, 3))
+    assert service.search.floors == [False]
+
+
+def test_pure_filter_query_skips_the_floor():
+    # semantic_query empty → search text is the raw-query fallback, which corpus
+    # passages never resemble; a floor there would drop everything.
+    parsed = ParsedQuery(semantic_query="", groups_or_parties=["PSOE"])
+    resolution = Resolution(filters={"group": "GS"})
+    service = _service(parsed, resolution)
+    service.execute("intervenciones del PSOE", today=date(2025, 7, 3))
+    assert service.search.floors == [False]
+
+
+def test_floor_gate_reaches_grouped_search_too():
+    parsed = ParsedQuery(semantic_query="Eurovisión", entities=["Eurovisión"])
+    resolution = Resolution(filters={"entities": "eurovision"})
+    service = _service(parsed, resolution)
+    service.execute("intervenciones sobre Eurovisión", today=date(2025, 7, 3),
+                    grouped=True)
+    assert service.search.calls[0][0] == "grouped"
+    assert service.search.floors == [False]
 
 
 def test_non_search_query_is_rejected():
