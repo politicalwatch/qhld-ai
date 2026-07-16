@@ -41,7 +41,17 @@ def test_create_embedder_unknown_provider_raises():
 
 
 def test_all_embedding_providers_registered():
-    assert {"openai", "google", "ollama"} <= set(factory_module._PROVIDERS)
+    assert {"openai", "google", "ollama", "vmlx"} <= set(factory_module._PROVIDERS)
+
+
+def test_vmlx_uses_its_own_base_url():
+    s = _settings(
+        embedding_provider="vmlx",
+        ollama_base_url="http://ollama:11434",
+        vmlx_base_url="http://vmlx:8080",
+    )
+    embedder = create_embedder_from_env(s)
+    assert embedder.base_url == "http://vmlx:8080"
 
 
 @pytest.mark.parametrize(
@@ -50,6 +60,7 @@ def test_all_embedding_providers_registered():
         ("openai", OpenAIEmbeddings),
         ("google", GoogleGenerativeAIEmbeddings),
         ("ollama", OllamaEmbeddings),
+        ("vmlx", OllamaEmbeddings),
     ],
 )
 def test_each_provider_builds_real_embedder(provider, expected_cls):

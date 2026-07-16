@@ -21,4 +21,4 @@ def create_embedder_from_env(settings: Settings | None = None) -> Embeddings:
     return _PROVIDERS[provider](s)
 
 
-from qhld_ai.infrastructure.embeddings import openai, google, ollama  # noqa: E402, F401
+from qhld_ai.infrastructure.embeddings import openai, google, ollama, vmlx  # noqa: E402, F401
