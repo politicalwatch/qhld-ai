@@ -276,6 +276,33 @@ def test_non_search_query_is_rejected():
     assert service.search.calls == []
 
 
+def test_empty_parse_is_rejected():
+    # The parser said "search" but extracted nothing — no topic, no filters.
+    # The pure-filter fallback would retrieve on the raw text with the floor
+    # skipped (gibberish that slips the is_speech_search gate lands here), so
+    # an empty parse is rejected like the gate would have.
+    parsed = ParsedQuery(semantic_query="")
+    service = _service(parsed, Resolution())
+    with pytest.raises(NotASpeechQuery):
+        service.execute("pkjw eirt zmxn 9483", today=date(2025, 7, 3))
+    assert service.search.calls == []
+
+
+def test_blocked_empty_parse_keeps_the_zero_hit_answer():
+    # An unsatisfiable filter with no residual topic is still a genuine speech
+    # query ("intervenciones de <unknown person>") — the honest zero-hit blocked
+    # result, not a rejection.
+    parsed = ParsedQuery(semantic_query="", mentioned_persons=["Santiago Segura"])
+    resolution = Resolution(unresolved=[
+        UnresolvedEntity("mentions", "Santiago Segura", blocking=True)])
+    service = _service(parsed, resolution)
+    result = service.execute("intervenciones que mencionen a Santiago Segura",
+                             today=date(2025, 7, 3))
+    assert result.hits == []
+    assert result.resolution.blocked
+    assert service.search.calls == []
+
+
 def test_rejection_applies_to_a_reused_parse():
     # The flag rides on the parsed object, so a precomputed parse is gated too.
     parsed = ParsedQuery(semantic_query="", is_speech_search=False)

@@ -129,6 +129,13 @@ class NaturalSearchSpeeches:
         # falls back to the raw query, which the corpus passages never resemble.
         pure_entity = bool(parsed.entities) and _entities_cover_topic(semantic, parsed.entities)
         apply_floor = bool(semantic) and not pure_entity
+        if not semantic and not filters and not resolution.blocked:
+            # An empty parse — no residual topic and nothing resolved to filter
+            # by — leaves nothing to search on: the raw-query fallback below
+            # would retrieve on noise with the floor skipped (the pure-filter
+            # exemption). Gibberish that slips the parser's is_speech_search
+            # gate lands exactly here, so treat it as the gate would.
+            raise NotASpeechQuery(query)
         semantic = semantic or query
         if resolution.blocked:
             # Some filter is unsatisfiable (e.g. a mentioned person absent from the
