@@ -1,6 +1,6 @@
 """Reranker behind Novita's hosted rerank API.
 
-The endpoint is fixed (https://api.novita.ai/v3/openai/rerank) — that is what
+The endpoint is fixed (https://api.novita.ai/openai/v1/rerank) — that is what
 makes this a dedicated provider rather than a ``rerank_api`` configuration;
 local Jina-schema servers (vMLX) go through ``rerank_api`` instead. Same
 request and response shape: ``POST {model, query, documents}`` returning
@@ -20,7 +20,7 @@ from qhld_ai.infrastructure.config.settings import Settings
 
 from .factory import _register
 
-_RERANK_URL = "https://api.novita.ai/v3/openai/rerank"
+_RERANK_URL = "https://api.novita.ai/openai/v1/rerank"
 
 
 class NovitaReranker(RerankerPort):

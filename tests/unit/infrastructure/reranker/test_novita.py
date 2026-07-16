@@ -66,7 +66,7 @@ def test_rerank_calls_the_hosted_endpoint_with_bearer_auth():
     reranker = _reranker(handler)
     reranker.rerank("la consulta", [_hit("a", 0.9, "un pasaje")], k=1)
 
-    assert seen["url"] == "https://api.novita.ai/v3/openai/rerank"  # fixed, not configured
+    assert seen["url"] == "https://api.novita.ai/openai/v1/rerank"  # fixed, not configured
     assert seen["auth"] == "Bearer novita_secret"
     assert seen["body"]["model"] == MODEL
     assert seen["body"]["query"] == "la consulta"

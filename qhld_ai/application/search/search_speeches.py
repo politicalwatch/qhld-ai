@@ -91,8 +91,12 @@ class SearchSpeeches:
                 **extra,
             )
         # Over-fetch groups (and highlights per group) so the reranker can promote
-        # a speech the bi-encoder ranked lower; rerank each group's highlights,
-        # recompute the group score from the best reranked highlight, re-sort, trim.
+        # a speech the bi-encoder ranked lower. All groups' highlights are pooled
+        # into ONE rerank call: a pointwise reranker scores each (query, passage)
+        # pair independently, so the scores are identical to per-group calls —
+        # and a reranker served over HTTP pays one round-trip per search instead
+        # of one per group. Each group is then rebuilt from its own reranked
+        # highlights: group score = best highlight, re-sort, trim.
         groups = self.store.search_grouped(
             collection,
             vector,
@@ -103,9 +107,16 @@ class SearchSpeeches:
             exclude=exclude,
             **extra,
         )
+        pooled = [hit for group in groups for hit in group.highlights]
+        rescored = self.reranker.rerank(query, pooled, len(pooled))
+        scores = {hit.id: hit.score for hit in rescored}
         reranked = []
         for group in groups:
-            top = self.reranker.rerank(query, group.highlights, highlights)
+            top = sorted(
+                (SearchHit(id=hit.id, score=scores[hit.id], payload=hit.payload)
+                 for hit in group.highlights),
+                key=lambda hit: hit.score, reverse=True,
+            )[:highlights]
             score = top[0].score if top else group.score
             reranked.append(SpeechGroup(speech_id=group.speech_id, score=score, highlights=top))
         reranked.sort(key=lambda group: group.score, reverse=True)

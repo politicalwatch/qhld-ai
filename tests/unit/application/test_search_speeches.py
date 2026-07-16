@@ -193,24 +193,34 @@ def test_reranker_score_floor_zero_keeps_every_hit():
     assert len(service.search("q", k=3)) == 3
 
 
+class _TwoGroupStore:
+    def search_grouped(self, name, vector, group_by, limit, group_size,
+                       filters=None, exclude=None):
+        return [
+            SpeechGroup(speech_id="A", score=0.5,
+                        highlights=[SearchHit(id="a1", score=0.5, payload={"text": "x"})]),
+            SpeechGroup(speech_id="B", score=0.5,
+                        highlights=[SearchHit(id="b1", score=0.5, payload={"text": "z"})]),
+        ]
+
+
+class _ScoresById:
+    """Rescores each pooled hit by a fixed per-id score (already sorted desc)."""
+
+    def __init__(self, scores):
+        self.scores = scores
+
+    def rerank(self, query, hits, k):
+        rescored = [SearchHit(id=h.id, score=self.scores[h.id], payload=h.payload)
+                    for h in hits]
+        rescored.sort(key=lambda hit: hit.score, reverse=True)
+        return rescored[:k]
+
+
 def test_reranker_score_floor_drops_low_scoring_groups():
-    hi_a = [SearchHit(id="a1", score=0.5, payload={"text": "x"})]
-    hi_b = [SearchHit(id="b1", score=0.5, payload={"text": "z"})]
-
-    class _Store:
-        def search_grouped(self, name, vector, group_by, limit, group_size,
-                           filters=None, exclude=None):
-            return [SpeechGroup(speech_id="A", score=0.5, highlights=hi_a),
-                    SpeechGroup(speech_id="B", score=0.5, highlights=hi_b)]
-
-    class _Rr:
-        def rerank(self, query, hits, k):
-            score = 0.9 if hits[0].id == "a1" else 0.05
-            return [SearchHit(id=hits[0].id, score=score, payload=hits[0].payload)]
-
     service = SearchSpeeches(
         settings=_settings(reranker_score_floor=0.15), embedder=_FakeEmbedder(),
-        store=_Store(), reranker=_Rr())
+        store=_TwoGroupStore(), reranker=_ScoresById({"a1": 0.9, "b1": 0.05}))
 
     groups = service.search_grouped("q", page_size=5, highlights=1)
 
@@ -218,23 +228,9 @@ def test_reranker_score_floor_drops_low_scoring_groups():
 
 
 def test_apply_floor_false_exempts_low_scoring_groups():
-    hi_a = [SearchHit(id="a1", score=0.5, payload={"text": "x"})]
-    hi_b = [SearchHit(id="b1", score=0.5, payload={"text": "z"})]
-
-    class _Store:
-        def search_grouped(self, name, vector, group_by, limit, group_size,
-                           filters=None, exclude=None):
-            return [SpeechGroup(speech_id="A", score=0.5, highlights=hi_a),
-                    SpeechGroup(speech_id="B", score=0.5, highlights=hi_b)]
-
-    class _Rr:
-        def rerank(self, query, hits, k):
-            score = 0.9 if hits[0].id == "a1" else 0.05
-            return [SearchHit(id=hits[0].id, score=score, payload=hits[0].payload)]
-
     service = SearchSpeeches(
         settings=_settings(reranker_score_floor=0.15), embedder=_FakeEmbedder(),
-        store=_Store(), reranker=_Rr())
+        store=_TwoGroupStore(), reranker=_ScoresById({"a1": 0.9, "b1": 0.05}))
 
     groups = service.search_grouped("q", page_size=5, highlights=1, apply_floor=False)
 
@@ -328,16 +324,46 @@ def test_search_grouped_reranks_highlights_and_resorts():
             return [SpeechGroup(speech_id="A", score=0.5, highlights=hi_a),
                     SpeechGroup(speech_id="B", score=0.9, highlights=hi_b)]
 
-    class _Promote:
-        # Gives group B a higher reranked score so it should overtake A
-        def rerank(self, query, hits, k):
-            score = 9.0 if hits[0].id == "b1" else 1.0
-            return [SearchHit(id=hits[0].id, score=score, payload=hits[0].payload)]
-
+    # Gives group B's highlight a higher reranked score so B should overtake A
+    reranker = _ScoresById({"a1": 1.0, "a2": 0.5, "b1": 9.0})
     service = SearchSpeeches(
-        settings=_settings(), embedder=_FakeEmbedder(), store=_Store(), reranker=_Promote())
+        settings=_settings(), embedder=_FakeEmbedder(), store=_Store(), reranker=reranker)
 
     groups = service.search_grouped("q", page_size=2, highlights=1)
 
     assert [g.speech_id for g in groups] == ["B", "A"]  # rerank promoted B
     assert groups[0].score == 9.0                        # group score = best highlight
+    assert [h.id for h in groups[1].highlights] == ["a1"]  # trimmed to best highlight
+
+
+def test_search_grouped_reranks_all_groups_in_one_call():
+    # One rerank call over the pooled highlights of every group — the shape a
+    # reranker served over HTTP depends on (one round-trip per search, not one
+    # per group). Scores come back per hit and are redistributed to their groups.
+    hi_a = [SearchHit(id="a1", score=0.5, payload={"text": "x"}),
+            SearchHit(id="a2", score=0.4, payload={"text": "y"})]
+    hi_b = [SearchHit(id="b1", score=0.9, payload={"text": "z"})]
+
+    class _Store:
+        def search_grouped(self, name, vector, group_by, limit, group_size,
+                           filters=None, exclude=None):
+            return [SpeechGroup(speech_id="A", score=0.5, highlights=hi_a),
+                    SpeechGroup(speech_id="B", score=0.9, highlights=hi_b)]
+
+    calls = []
+
+    class _Recording(_ScoresById):
+        def rerank(self, query, hits, k):
+            calls.append(([h.id for h in hits], k))
+            return super().rerank(query, hits, k)
+
+    reranker = _Recording({"a1": 0.7, "a2": 0.8, "b1": 0.6})
+    service = SearchSpeeches(
+        settings=_settings(), embedder=_FakeEmbedder(), store=_Store(), reranker=reranker)
+
+    groups = service.search_grouped("q", page_size=2, highlights=2)
+
+    assert calls == [(["a1", "a2", "b1"], 3)]        # ONE call, pooled, k = all
+    assert [g.speech_id for g in groups] == ["A", "B"]
+    assert [h.id for h in groups[0].highlights] == ["a2", "a1"]  # re-sorted in-group
+    assert groups[0].score == 0.8 and groups[1].score == 0.6
