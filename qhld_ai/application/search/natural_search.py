@@ -3,9 +3,11 @@
 Orchestrates parse -> resolve -> filtered retrieve, then delegates to the existing
 ``SearchSpeeches`` on the *residual* semantic query (topic only), applying the
 resolved structured filters. Plain and injectable — parser, resolver and search
-are all defaulted from env for production but overridable in tests. The LangGraph
-wrapper (and LangSmith tracing) is deferred; this near-linear flow is a plain
-service for now.
+are all defaulted from env for production but overridable in tests. ``execute``
+is the LangSmith root span (inert unless LANGSMITH_TRACING is set): the parser's
+LLM call auto-nests under it via langchain, resolution and the search stages are
+traced pass-throughs, and a rejected query surfaces as the span's error. The
+LangGraph wrapper is still deferred; this near-linear flow is a plain service.
 
 ``today`` is passed in (from the CLI edge), never read from a wall-clock here, so
 relative-date resolution stays deterministic and testable.
@@ -13,6 +15,8 @@ relative-date resolution stays deterministic and testable.
 
 import logging
 from dataclasses import dataclass, field
+
+from langsmith import traceable
 
 from qhld_ai.application.search.resolve_entities import EntityResolver, Resolution
 from qhld_ai.domain.entities import normalize_entity
@@ -90,6 +94,13 @@ class NaturalSearchSpeeches:
             self._resolver = self._resolver_from_corpus()
         return self._resolver
 
+    @traceable(name="resolve_entities", run_type="chain")
+    def _resolve(self, parsed) -> Resolution:
+        """Traced pass-through: the resolved filters and every unresolved entity
+        show up per query in the search trace."""
+        return self.resolver().resolve(parsed)
+
+    @traceable(name="natural_search", run_type="chain")
     def execute(self, query, today, k=10, grouped=False, highlights=3,
                 exclude=None, parsed=None) -> NaturalResult:
         """``exclude`` is the "load more" cursor of ``search_grouped``: the
@@ -103,7 +114,7 @@ class NaturalSearchSpeeches:
             # assistant): reject outright rather than retrieve on nonsense. The
             # flag rides on the parsed object, so a reused parse is covered too.
             raise NotASpeechQuery(query)
-        resolution = self.resolver().resolve(parsed)
+        resolution = self._resolve(parsed)
         # Unresolved values are the raw material for catalog curation (a missing
         # alias scores a near miss; an out-of-catalog person scores low), so keep
         # a trace of every one.
