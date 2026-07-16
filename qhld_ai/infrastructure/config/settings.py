@@ -56,15 +56,21 @@ class Settings(BaseSettings):
     reranker_provider: str = "noop"
     reranker_model: str = ""
     reranker_top_n: int = 50
-    # Rerankers served over HTTP: the model stays loaded in its own server
-    # process instead of being loaded in-process by every caller. For "tei"
-    # the base URL is the server root (the adapter calls its fixed /rerank
-    # route); for "rerank_api" it is the FULL rerank endpoint URL, because
-    # vendors mount it at different paths (e.g. a local vMLX serves
-    # http://127.0.0.1:11438/v1/rerank, Jina's hosted API
-    # https://api.jina.ai/v1/rerank). The API key is only sent when set.
+    # Rerankers served over HTTP by a LOCAL server: the model stays loaded in
+    # its own process instead of being loaded in-process by every caller. For
+    # "tei" the base URL is the server root (the adapter calls its fixed
+    # /rerank route); for "rerank_api" it is the FULL rerank endpoint URL,
+    # because servers mount it at different paths (e.g. a local vMLX serves
+    # http://127.0.0.1:11438/v1/rerank). Local servers are unauthenticated —
+    # hosted vendors get dedicated providers with their own keys below.
     reranker_base_url: str = ""
-    reranker_api_key: str = ""
+    # Hosted-vendor providers ("jina", "cohere", "voyage") authenticate with
+    # per-vendor keys so several vendors can coexist in one .env. The cohere
+    # and voyage SDKs also read their own env vars (COHERE_API_KEY /
+    # VOYAGE_API_KEY) when the setting is empty.
+    jina_api_key: str = ""
+    cohere_api_key: str = ""
+    voyage_api_key: str = ""
     # Relevance floor on the reranked score: results below it are dropped, so an
     # off-domain or nonsensical query returns nothing rather than the top-k
     # least-irrelevant passages (bi-encoder cosine / RRF scores don't separate

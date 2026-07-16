@@ -22,6 +22,8 @@ dependencies = [
     "spacy>=3.8,<3.9",
     "es-core-news-lg @ https://github.com/explosion/spacy-models/releases/download/es_core_news_lg-3.8.0/es_core_news_lg-3.8.0-py3-none-any.whl",
     "dateparser>=1.2,<2",
+    "langchain-cohere>=0.6.0",
+    "langchain-voyageai>=0.4.0",
 ]
 
 [build-system]

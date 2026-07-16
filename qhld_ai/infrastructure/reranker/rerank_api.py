@@ -1,15 +1,16 @@
-"""Reranker behind a vendor-style rerank HTTP API.
+"""Reranker behind a local Jina-schema rerank HTTP server.
 
-Speaks the request/response shape shared by Jina's rerank API and its
-lookalikes (a local vMLX server, Novita, ...): ``POST {model, query,
-documents}`` returning ``results`` rows of ``{index, relevance_score}``.
-``reranker_base_url`` is the FULL endpoint URL — vendors mount the route at
-different paths — and ``reranker_api_key`` is sent as a bearer token only when
-set (local servers are unauthenticated). Score space is the served model's own
-(e.g. jina-reranker-v3 returns cosine similarities, not sigmoid probabilities),
-so relevance floors calibrated for another model do NOT carry over. The
-``httpx.Client`` is created lazily on first use, so importing this module stays
-cheap.
+Speaks the request/response shape of Jina's rerank API — ``POST {model,
+query, documents}`` returning ``results`` rows of ``{index, relevance_score}``
+— as emulated by local servers (a vMLX engine serving an MLX reranker, ...).
+``reranker_base_url`` is the FULL endpoint URL because servers mount the route
+at different paths (e.g. vMLX serves http://127.0.0.1:11438/v1/rerank). Local
+servers are unauthenticated and unmetered, so there is no API key and no retry
+layer; hosted vendors get dedicated providers ("jina", "cohere", "voyage")
+instead. Score space is the served model's own (e.g. jina-reranker-v3 returns
+cosine similarities, not sigmoid probabilities), so relevance floors
+calibrated for another model do NOT carry over. The ``httpx.Client`` is
+created lazily on first use, so importing this module stays cheap.
 """
 
 from qhld_ai.domain.ports.reranker import RerankerPort
@@ -20,10 +21,9 @@ from .factory import _register
 
 
 class RerankAPIReranker(RerankerPort):
-    def __init__(self, url: str, model: str, api_key: str = "", timeout: float = 120.0):
+    def __init__(self, url: str, model: str, timeout: float = 120.0):
         self._url = url
         self._model = model
-        self._api_key = api_key
         self._timeout = timeout
         self._client = None
 
@@ -32,8 +32,7 @@ class RerankAPIReranker(RerankerPort):
         if self._client is None:
             import httpx
 
-            headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
-            self._client = httpx.Client(headers=headers, timeout=self._timeout)
+            self._client = httpx.Client(timeout=self._timeout)
         return self._client
 
     def rerank(self, query: str, hits: list[SearchHit], k: int) -> list[SearchHit]:
@@ -62,5 +61,4 @@ def create(settings: Settings) -> RerankAPIReranker:
     return RerankAPIReranker(
         settings.reranker_base_url,
         settings.reranker_model,
-        settings.reranker_api_key,
     )

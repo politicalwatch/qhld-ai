@@ -4,8 +4,10 @@ Adapters self-register a ``create(settings)`` callable under a provider name; th
 factory dispatches on ``settings.reranker_provider``. "noop" leaves the bi-encoder
 order untouched (the clean baseline); "cross_encoder" loads a sentence-transformers
 cross-encoder in-process; "tei" calls the same model served over HTTP by a
-text-embeddings-inference server; "rerank_api" calls a vendor-style rerank API
-(Jina schema: a local vMLX server, Jina's hosted API, ...).
+text-embeddings-inference server; "rerank_api" calls a LOCAL Jina-schema rerank
+server (a vMLX engine, ...); "jina" calls Jina's hosted rerank API; "cohere"
+and "voyage" call those vendors' hosted rerank models through their own SDKs
+(via langchain-cohere / langchain-voyageai).
 """
 
 from qhld_ai.domain.ports.reranker import RerankerPort
@@ -34,8 +36,11 @@ def create_reranker_from_env(settings: Settings | None = None) -> RerankerPort:
 
 # Trigger adapter self-registration.
 from qhld_ai.infrastructure.reranker import (  # noqa: E402, F401
+    cohere,
     cross_encoder,
+    jina,
     noop,
     rerank_api,
     tei,
+    voyage,
 )
