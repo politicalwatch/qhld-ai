@@ -28,4 +28,5 @@ from qhld_ai.infrastructure.llm import (  # noqa: E402, F401
     mistral,
     ollama,
     openai,
+    vmlx,
 )

@@ -11,8 +11,7 @@ class Settings(BaseSettings):
     # Logging (field name matches env LOGLEVEL exactly)
     loglevel: str = "INFO"
 
-    # LLM providers. Field names mirror vinculante so the infrastructure/llm
-    # adapters work unchanged.
+    # LLM providers.
     llm_provider: str = "anthropic"
     llm_model: str = "claude-sonnet-4-6"
     llm_temperature: float = 0.0
@@ -21,6 +20,7 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     mistral_api_key: str = ""
     ollama_base_url: str = "http://host.docker.internal:11434"
+    vmlx_base_url: str = "http://host.docker.internal:8080"
 
     # Embeddings
     embedding_provider: str = "openai"

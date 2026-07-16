@@ -51,7 +51,7 @@ def test_create_llm_unknown_provider_raises():
 
 
 def test_all_llm_providers_registered():
-    assert {"anthropic", "openai", "ollama", "google", "mistral"} <= set(
+    assert {"anthropic", "openai", "ollama", "google", "mistral", "vmlx"} <= set(
         factory_module._PROVIDERS
     )
 
@@ -72,12 +72,23 @@ def test_anthropic_keeps_temperature_for_older_models():
     assert llm.temperature == pytest.approx(0.0)
 
 
+def test_vmlx_uses_its_own_base_url():
+    s = _settings(
+        llm_provider="vmlx",
+        ollama_base_url="http://ollama:11434",
+        vmlx_base_url="http://vmlx:8080",
+    )
+    llm = create_llm_from_env(s)
+    assert llm.base_url == "http://vmlx:8080"
+
+
 @pytest.mark.parametrize(
     "provider, expected_cls",
     [
         ("anthropic", ChatAnthropic),
         ("openai", ChatOpenAI),
         ("ollama", ChatOllama),
+        ("vmlx", ChatOllama),
         ("google", ChatGoogleGenerativeAI),
         ("mistral", ChatMistralAI),
     ],
