@@ -37,8 +37,9 @@ las restricciones de orador, persona mencionada, grupo/partido ni fechas. Cadena
 vacía si la consulta no tiene tema.
 - speakers: TODAS las personas que INTERVIENEN, indicadas por su nombre propio, un \
 elemento de la lista por persona (p. ej. 'de Pedro Sánchez y Yolanda Díaz' → \
-['Pedro Sánchez', 'Yolanda Díaz']). Null si se refiere a ellas por su cargo, o si \
-no se especifica orador.
+['Pedro Sánchez', 'Yolanda Díaz']). Un apellido solo, aun en minúscula, es el \
+nombre propio de un orador ('qué dijo lópez sobre X' → ['lópez']). Null si se \
+refiere a ellas por su cargo, o si no se especifica orador.
 - mentioned_persons: TODAS las personas que la intervención debe MENCIONAR o \
 nombrar, que NO son quien interviene, un elemento por persona (p. ej. 'discursos \
 que mencionen a Zapatero y a Rajoy' → ['Zapatero', 'Rajoy']). Null si la consulta \
@@ -56,8 +57,12 @@ Gaza'), un lugar del que TRATA la intervención ('sobre la sequía en Málaga' �
 partidos o grupos (van en groups_or_parties), ni las personas (speakers / \
 mentioned_persons), ni la provincia de elección de los diputados \
 (constituencies). La entidad se mantiene TAMBIÉN dentro de semantic_query: es el \
-tema. Null si el tema no nombra ninguna entidad concreta (un tema de nombre \
-común como 'vivienda pública' no es una entidad).
+tema. Una entidad exige un NOMBRE PROPIO concreto (una organización, una ley por \
+su nombre, un evento, un conflicto o un lugar). Un sustantivo común que nombra el \
+asunto, la política o el fenómeno del que trata la intervención NO es una entidad, \
+aunque lleve artículo: p. ej. 'la corrupción', 'el desempleo', 'la sanidad \
+pública', 'la educación', 'la vivienda pública' son el TEMA (van en \
+semantic_query), no entidades. Null si el tema no nombra ninguna entidad concreta.
 - entities_mode: cómo combinar varias entidades: 'all' si deben aparecer todas \
 (conjunción 'y'/'e', o una sola entidad); 'any' si basta con una (disyunción \
 'o'/'u').
@@ -81,8 +86,11 @@ categoría ideológica o de bloque en vez de nombres concretos ('la izquierda', 
 expandas a partidos: emite el término de la categoría tal cual como un único \
 elemento (p. ej. 'los partidos de izquierda' → ['izquierda']). Null si no hay.
 - date_from / date_to: rango de fechas en formato ISO YYYY-MM-DD. Resuelve las \
-expresiones relativas ('el último año', 'últimos tres meses', 'en 2024') tomando \
-como fecha actual {today}. Null si no hay restricción temporal.
+expresiones relativas con un intervalo DEFINIDO ('el último año', 'últimos tres \
+meses', 'en 2024', 'el año pasado') tomando como fecha actual {today}. Los \
+adverbios vagos SIN intervalo definido ('últimamente', 'hace poco', 'en los \
+últimos tiempos') NO son un rango de fechas: deja date_from y date_to en null. \
+Null también si no hay ninguna restricción temporal.
 - lang, legislature: solo si se indican explícitamente.
 """
 
