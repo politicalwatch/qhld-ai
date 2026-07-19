@@ -93,9 +93,21 @@ class SpacyNer(NerPort):
             return []
         doc = self._doc(text)
         rescued = self._rescued(doc)
+        gate = getattr(self.settings, "ner_entity_pos_gate", True)
         return [ent.text for ent in doc.ents
                 if ent.label_ != "PER"
-                and not any(s < ent.end and ent.start < e for s, e in rescued)]
+                and not any(s < ent.end and ent.start < e for s, e in rescued)
+                and (not gate or self._is_entity_like(ent))]
+
+    @staticmethod
+    def _is_entity_like(ent) -> bool:
+        """A named entity is a proper-noun phrase, not a clause or a discourse token.
+        The base model spreads clause-level span errors and function words across its
+        MISC/ORG/LOC labels ("Por tanto", "Llama la atención la presencia de casos…");
+        requiring a proper noun and rejecting any verb drops those at the source, while
+        keeping real orgs/places/laws/events (all PROPN, no verb)."""
+        pos = {tok.pos_ for tok in ent}
+        return "PROPN" in pos and not (pos & {"VERB", "AUX"})
 
 
 @_register("spacy")

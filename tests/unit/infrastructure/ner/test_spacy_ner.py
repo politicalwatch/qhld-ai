@@ -80,6 +80,44 @@ def test_entity_spans_excludes_gazetteer_rescued_surnames():
     assert any("Eurovisión" in s for s in entity_spans)
 
 
+def test_entity_pos_gate_predicate_keeps_names_drops_clauses():
+    from qhld_ai.infrastructure.config.settings import Settings
+    from qhld_ai.infrastructure.ner.factory import create_ner_from_env
+    from qhld_ai.infrastructure.ner.spacy import SpacyNer
+
+    nlp = create_ner_from_env(Settings())._model()
+    # Proper-noun phrases pass; discourse tokens (no PROPN) and verb-bearing spans fail.
+    assert SpacyNer._is_entity_like(nlp("Unión Europea"))
+    assert SpacyNer._is_entity_like(nlp("Eurovisión"))
+    assert not SpacyNer._is_entity_like(nlp("Por tanto"))
+    assert not SpacyNer._is_entity_like(nlp("Esta evidencia"))
+    assert not SpacyNer._is_entity_like(nlp("aprobó la Ley de Industria"))
+
+
+def test_entity_pos_gate_drops_verb_bearing_spans():
+    from qhld_ai.infrastructure.config.settings import Settings
+    from qhld_ai.infrastructure.ner.factory import create_ner_from_env
+
+    # The base model glues a whole clause into one MISC span here; the gate must drop
+    # any span carrying a verb, while the raw model (gate off) still emits it.
+    text = "Esta evidencia es clara. La Unión Europea aprobó la Ley de Industria."
+    on = create_ner_from_env(Settings())
+    off = create_ner_from_env(Settings(ner_entity_pos_gate=False))
+    assert any("aprobó" in s for s in off.entity_spans(text))
+    assert not any("aprobó" in s for s in on.entity_spans(text))
+
+
+def test_entity_pos_gate_keeps_genuine_entities():
+    from qhld_ai.infrastructure.config.settings import Settings
+    from qhld_ai.infrastructure.ner.factory import create_ner_from_env
+
+    # Real proper-noun entities survive the gate (they are PROPN with no verb).
+    ner = create_ner_from_env(Settings())
+    spans = ner.entity_spans("Navantia construye buques en Cádiz.")
+    assert any("Navantia" in s for s in spans)
+    assert any("Cádiz" in s for s in spans)
+
+
 def test_person_and_entity_spans_share_one_parse():
     from qhld_ai.infrastructure.config.settings import Settings
     from qhld_ai.infrastructure.ner.factory import create_ner_from_env

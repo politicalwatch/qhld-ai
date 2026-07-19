@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     # tags the uncommon/compound ones (Catalan/Basque names, hyphenated compounds) the
     # base model misses. Off => base model only.
     ner_gazetteer: bool = True
+    # Precision gate on non-person entity spans: keep a span only if it holds a proper
+    # noun and no verb, so clauses and discourse fragments the model mislabels as
+    # entities ("Por tanto", "Llama la atención…") are dropped at the source. Off =>
+    # every non-PER span is emitted (the raw model output).
+    ner_entity_pos_gate: bool = True
     mention_match_threshold: int = 90
 
 
