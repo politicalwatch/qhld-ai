@@ -34,6 +34,11 @@ def test_normalize_entity(span, key):
         "El Gobierno",     # parliamentary furniture (stoplist)
         "Congreso de los Diputados",
         "España",
+        "Ustedes",         # discourse / forms of address (stoplist)
+        "Buenos días",
+        "Miren",
+        "La Administración",
+        "Arratsalde on",
     ],
 )
 def test_normalize_entity_drops_unusable(span):

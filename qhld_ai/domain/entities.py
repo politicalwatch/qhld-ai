@@ -47,6 +47,14 @@ STOP_ENTITIES = frozenset({
     "estado", "espana", "pleno", "mesa", "comision", "diario de sesiones",
     "constitucion", "constitucion espanola", "boletin oficial del estado",
     "presidencia", "legislatura", "senoria", "senorias",
+    # Ubiquitous institutional common nouns (the same furniture as above, other
+    # surfaces): the executive, plural governments/states, the administration.
+    "gobiernos", "estados", "ejecutivo", "administracion", "administraciones",
+    # Discourse, forms of address and greetings the model mislabels as entities when
+    # they open a sentence (capitalized => PROPN); they name nothing filterable.
+    "ustedes", "nosotras", "senora", "hombre", "por",
+    "miren", "fijense", "permitanme",
+    "buenos dias", "arratsalde on", "egun on", "gracies",
 })
 
 
