@@ -28,6 +28,11 @@ from qhld_ai.infrastructure.vectorstore.naming import collection_name
 
 logger = logging.getLogger(__name__)
 
+# Upper bound for the single-speech passage search. The ``speech_id`` filter
+# limits candidates to one speech's chunks, so this ceiling is never the binding
+# constraint — it exists only because Qdrant's query API requires a limit.
+_PASSAGES_K = 1000
+
 # Function words that connect entities inside a semantic query ("Navantia y
 # UNRWA", "sequía en Málaga") without adding topical content of their own.
 _CONNECTOR_TOKENS = {
@@ -100,15 +105,12 @@ class NaturalSearchSpeeches:
         show up per query in the search trace."""
         return self.resolver().resolve(parsed)
 
-    @traceable(name="natural_search", run_type="chain")
-    def execute(self, query, today, k=10, grouped=False, highlights=3,
-                exclude=None, parsed=None) -> NaturalResult:
-        """``exclude`` is the "load more" cursor of ``search_grouped``: the
-        speech_ids already shown, skipped so the next call yields fresh speeches
-        (grouped mode only — flat hits have no stateless pagination). ``parsed``
-        lets a caller reuse a previous parse of the same query (the parse is an
-        LLM call), skipping the parser entirely."""
-        parsed = parsed or self.parser.parse(query, today)
+    def _prepare(self, query, parsed):
+        """Shared prelude of ``execute`` and ``passages``: parse-gate, resolve,
+        then derive the residual semantic query and the relevance-floor decision.
+        Raises ``NotASpeechQuery`` for a non-search or empty parse; returns
+        ``(resolution, filters, semantic, apply_floor)`` otherwise (``semantic``
+        already falls back to the raw query for pure-filter/blocked cases)."""
         if not parsed.is_speech_search:
             # Not a search at all (a command, an injection, a question to the
             # assistant): reject outright rather than retrieve on nonsense. The
@@ -148,6 +150,18 @@ class NaturalSearchSpeeches:
             # gate lands exactly here, so treat it as the gate would.
             raise NotASpeechQuery(query)
         semantic = semantic or query
+        return resolution, filters, semantic, apply_floor
+
+    @traceable(name="natural_search", run_type="chain")
+    def execute(self, query, today, k=10, grouped=False, highlights=3,
+                exclude=None, parsed=None) -> NaturalResult:
+        """``exclude`` is the "load more" cursor of ``search_grouped``: the
+        speech_ids already shown, skipped so the next call yields fresh speeches
+        (grouped mode only — flat hits have no stateless pagination). ``parsed``
+        lets a caller reuse a previous parse of the same query (the parse is an
+        LLM call), skipping the parser entirely."""
+        parsed = parsed or self.parser.parse(query, today)
+        resolution, filters, semantic, apply_floor = self._prepare(query, parsed)
         if resolution.blocked:
             # Some filter is unsatisfiable (e.g. a mentioned person absent from the
             # catalog): the honest answer is zero hits. Searching without that
@@ -165,3 +179,27 @@ class NaturalSearchSpeeches:
         return NaturalResult(
             parsed=parsed, resolution=resolution, semantic_query=semantic,
             hits=hits, grouped=grouped)
+
+    @traceable(name="natural_search_passages", run_type="chain")
+    def passages(self, query, today, speech_id, parsed=None) -> NaturalResult:
+        """Every relevance-floored passage of ONE speech for this query — the
+        detail page highlights all matching passages, not just the few shown on a
+        result card. An ungrouped ``search`` scoped to the speech via a
+        ``speech_id`` payload filter; combining it with the query's resolved
+        filters is sound because the speech was already a search result, so it
+        satisfies them. Same floor gate as ``execute`` (the passages must match
+        what the results page showed), and ``parsed`` reuses the memoized parse."""
+        parsed = parsed or self.parser.parse(query, today)
+        resolution, filters, semantic, apply_floor = self._prepare(query, parsed)
+        if resolution.blocked:
+            return NaturalResult(
+                parsed=parsed, resolution=resolution, semantic_query=semantic)
+        # k is a ceiling the Qdrant API requires, not a passage cap: the
+        # speech_id filter narrows candidates to this one speech's chunks (dozens
+        # at most), so a large k just means "return them all above the floor".
+        scoped = {**(filters or {}), "speech_id": speech_id}
+        hits = self.search.search(
+            semantic, k=_PASSAGES_K, filters=scoped, apply_floor=apply_floor)
+        return NaturalResult(
+            parsed=parsed, resolution=resolution, semantic_query=semantic,
+            hits=hits)
