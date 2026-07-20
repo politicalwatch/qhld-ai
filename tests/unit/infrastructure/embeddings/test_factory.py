@@ -41,7 +41,21 @@ def test_create_embedder_unknown_provider_raises():
 
 
 def test_all_embedding_providers_registered():
-    assert {"openai", "google", "ollama", "vmlx"} <= set(factory_module._PROVIDERS)
+    assert {"openai", "google", "ollama", "vmlx", "novita"} <= set(factory_module._PROVIDERS)
+
+
+def test_novita_uses_its_own_key_and_the_hosted_endpoint():
+    s = _settings(
+        embedding_provider="novita",
+        embedding_model="baai/bge-m3",
+        openai_api_key="openai_secret",
+        novita_api_key="novita_secret",
+    )
+    embedder = create_embedder_from_env(s)
+    assert embedder.openai_api_key.get_secret_value() == "novita_secret"
+    assert embedder.openai_api_base == "https://api.novita.ai/openai/v1"
+    # Raw strings, not tiktoken token arrays — Novita is not OpenAI's backend.
+    assert embedder.check_embedding_ctx_length is False
 
 
 def test_vmlx_uses_its_own_base_url():
@@ -61,6 +75,7 @@ def test_vmlx_uses_its_own_base_url():
         ("google", GoogleGenerativeAIEmbeddings),
         ("ollama", OllamaEmbeddings),
         ("vmlx", OllamaEmbeddings),
+        ("novita", OpenAIEmbeddings),
     ],
 )
 def test_each_provider_builds_real_embedder(provider, expected_cls):
@@ -68,5 +83,6 @@ def test_each_provider_builds_real_embedder(provider, expected_cls):
         embedding_provider=provider,
         openai_api_key="x",
         google_api_key="x",
+        novita_api_key="x",
     )
     assert isinstance(create_embedder_from_env(s), expected_cls)
