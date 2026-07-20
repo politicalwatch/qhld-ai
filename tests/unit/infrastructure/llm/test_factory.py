@@ -51,9 +51,9 @@ def test_create_llm_unknown_provider_raises():
 
 
 def test_all_llm_providers_registered():
-    assert {"anthropic", "openai", "ollama", "google", "mistral", "vmlx"} <= set(
-        factory_module._PROVIDERS
-    )
+    assert {
+        "anthropic", "openai", "ollama", "google", "mistral", "vmlx", "novita"
+    } <= set(factory_module._PROVIDERS)
 
 
 def test_anthropic_omits_temperature_for_reasoning_models():
@@ -82,6 +82,18 @@ def test_vmlx_uses_its_own_base_url():
     assert llm.base_url == "http://vmlx:8080"
 
 
+def test_novita_uses_its_own_key_and_the_hosted_endpoint():
+    s = _settings(
+        llm_provider="novita",
+        llm_model="openai/gpt-oss-20b",
+        openai_api_key="openai_secret",
+        novita_api_key="novita_secret",
+    )
+    llm = create_llm_from_env(s)
+    assert llm.openai_api_key.get_secret_value() == "novita_secret"
+    assert llm.openai_api_base == "https://api.novita.ai/openai/v1"
+
+
 @pytest.mark.parametrize(
     "provider, expected_cls",
     [
@@ -91,6 +103,7 @@ def test_vmlx_uses_its_own_base_url():
         ("vmlx", ChatOllama),
         ("google", ChatGoogleGenerativeAI),
         ("mistral", ChatMistralAI),
+        ("novita", ChatOpenAI),
     ],
 )
 def test_each_provider_builds_real_chatmodel(provider, expected_cls):
@@ -102,5 +115,6 @@ def test_each_provider_builds_real_chatmodel(provider, expected_cls):
         openai_api_key="x",
         google_api_key="x",
         mistral_api_key="x",
+        novita_api_key="x",
     )
     assert isinstance(create_llm_from_env(s), expected_cls)

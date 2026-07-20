@@ -26,6 +26,7 @@ from qhld_ai.infrastructure.llm import (  # noqa: E402, F401
     anthropic,
     google,
     mistral,
+    novita,
     ollama,
     openai,
     vmlx,
