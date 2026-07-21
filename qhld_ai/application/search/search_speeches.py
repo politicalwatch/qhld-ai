@@ -143,7 +143,8 @@ class SearchSpeeches:
         # pair independently, so the scores are identical to per-group calls —
         # and a reranker served over HTTP pays one round-trip per search instead
         # of one per group. Each group is then rebuilt from its own reranked
-        # highlights: group score = best highlight, re-sort, trim.
+        # highlights: drop below-floor passages, keep one language, group score =
+        # best surviving highlight, re-sort, trim.
         groups = self._store_search_grouped(
             collection,
             vector,
@@ -157,18 +158,37 @@ class SearchSpeeches:
         pooled = [hit for group in groups for hit in group.highlights]
         rescored = self._rerank(query, pooled, len(pooled),
                                 langsmith_extra=self._rerank_metadata())
-        scores = {hit.id: hit.score for hit in rescored}
+        # Floor the passages themselves (same gate the ungrouped path applies),
+        # so a card never shows a below-floor snippet the detail page then drops.
+        # A speech qualifies iff it keeps at least one passage — equivalent to the
+        # old "best passage ≥ floor" group gate, so the result set is unchanged.
+        surviving = self._above_floor(rescored, apply_floor)
+        scores = {hit.id: hit.score for hit in surviving}
         reranked = []
         for group in groups:
-            top = sorted(
+            ranked = sorted(
                 (SearchHit(id=hit.id, score=scores[hit.id], payload=hit.payload)
-                 for hit in group.highlights),
+                 for hit in group.highlights if hit.id in scores),
                 key=lambda hit: hit.score, reverse=True,
-            )[:highlights]
-            score = top[0].score if top else group.score
-            reranked.append(SpeechGroup(speech_id=group.speech_id, score=score, highlights=top))
+            )
+            if not ranked:
+                continue
+            # One language per card (no original/translation twins of the same
+            # passage): keep the matched language — the top-scoring survivor's lang,
+            # which is the query's language for a same-language corpus hit — with
+            # Spanish as the fallback, then whatever remains. Done BEFORE the top-N
+            # trim so twins never consume card slots.
+            matched = ranked[0].payload.get("lang")
+            same = (
+                [hit for hit in ranked if hit.payload.get("lang") == matched]
+                or [hit for hit in ranked if hit.payload.get("lang") == "es"]
+                or ranked
+            )
+            top = same[:highlights]
+            reranked.append(
+                SpeechGroup(speech_id=group.speech_id, score=top[0].score, highlights=top))
         reranked.sort(key=lambda group: group.score, reverse=True)
-        return self._above_floor(reranked, apply_floor)[:page_size]
+        return reranked[:page_size]
 
     def _above_floor(self, items, apply_floor):
         """Drop reranked hits/groups scoring below the relevance floor. Only the

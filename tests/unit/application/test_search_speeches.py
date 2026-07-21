@@ -367,3 +367,47 @@ def test_search_grouped_reranks_all_groups_in_one_call():
     assert [g.speech_id for g in groups] == ["A", "B"]
     assert [h.id for h in groups[0].highlights] == ["a2", "a1"]  # re-sorted in-group
     assert groups[0].score == 0.8 and groups[1].score == 0.6
+
+
+def test_search_grouped_floors_individual_highlights():
+    # The floor gates each PASSAGE, not just the speech: a speech whose best
+    # passage clears the floor is kept, but its below-floor passages are dropped —
+    # so a card never shows a snippet the detail page (which floors per passage)
+    # would then omit.
+    hi = [SearchHit(id="a1", score=0.5, payload={"text": "x", "lang": "es"}),
+          SearchHit(id="a2", score=0.5, payload={"text": "y", "lang": "es"})]
+
+    class _Store:
+        def search_grouped(self, name, vector, group_by, limit, group_size,
+                           filters=None, exclude=None):
+            return [SpeechGroup(speech_id="A", score=0.5, highlights=hi)]
+
+    service = SearchSpeeches(
+        settings=_settings(reranker_score_floor=0.15), embedder=_FakeEmbedder(),
+        store=_Store(), reranker=_ScoresById({"a1": 0.9, "a2": 0.05}))
+
+    groups = service.search_grouped("q", page_size=5, highlights=3)
+
+    assert [g.speech_id for g in groups] == ["A"]            # kept: a1 clears the floor
+    assert [h.id for h in groups[0].highlights] == ["a1"]    # a2 (0.05) dropped by the floor
+
+
+def test_search_grouped_keeps_one_language_per_card():
+    # A passage indexed in two languages (original + translation) must not appear
+    # twice on a card: keep the matched language (the top-scoring survivor's lang),
+    # dropping the lower-scoring twin — even though both clear the floor.
+    hi = [SearchHit(id="es1", score=0.5, payload={"text": "es", "lang": "es"}),
+          SearchHit(id="ca1", score=0.5, payload={"text": "ca", "lang": "ca"})]
+
+    class _Store:
+        def search_grouped(self, name, vector, group_by, limit, group_size,
+                           filters=None, exclude=None):
+            return [SpeechGroup(speech_id="A", score=0.5, highlights=hi)]
+
+    service = SearchSpeeches(
+        settings=_settings(reranker_score_floor=0.15), embedder=_FakeEmbedder(),
+        store=_Store(), reranker=_ScoresById({"es1": 0.9, "ca1": 0.4}))
+
+    groups = service.search_grouped("q", page_size=5, highlights=3)
+
+    assert [h.id for h in groups[0].highlights] == ["es1"]   # matched lang wins; ca twin dropped
