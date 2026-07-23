@@ -5,26 +5,60 @@ description = "QHLD AI"
 readme = "README.md"
 requires-python = ">=3.12"
 
+# Core: always installed, regardless of which providers an image runs. The
+# vector store, language detection, fuzzy catalog matching and tracing are on
+# every code path; httpx is used directly by the hosted rerankers (jina/novita).
+# Everything provider- or feature-specific lives in optional-dependencies below,
+# so each image installs only what it serves (see the profiles: backend/engine/
+# dev/all). The llm/embeddings factories skip providers whose SDK is absent.
 dependencies = [
     "pydantic-settings==2.14.2",
     "thefuzz==0.22.1",
     "langchain-core==1.5.0",
-    "langchain-anthropic==1.4.8",
-    "langchain-openai==1.4.0",
-    "langchain-ollama==1.1.0",
-    "langchain-google-genai==4.2.7",
-    "langchain-mistralai==1.1.6",
     "qhld-data",
     "py3langid==0.3.0",
     "qdrant-client==1.18.0",
-    "fastembed==0.8.0",
-    "sentence-transformers>=3.3.0",
+    "httpx",
+    "langsmith>=0.10",
+]
+
+[project.optional-dependencies]
+# --- Building blocks: one per provider/feature, compose freely ---------------
+# LLM + embeddings providers. langchain-openai also serves Novita (its adapters
+# wrap ChatOpenAI/OpenAIEmbeddings against Novita's OpenAI-compatible endpoint);
+# langchain-ollama also serves vMLX.
+openai = ["langchain-openai==1.4.0"]
+ollama = ["langchain-ollama==1.1.0"]
+anthropic = ["langchain-anthropic==1.4.8"]
+google = ["langchain-google-genai==4.2.7"]
+mistral = ["langchain-mistralai==1.1.6"]
+# Rerankers. Hosted jina/novita need no SDK (direct httpx, in core). cohere and
+# voyage wrap vendor SDKs; reranker-local is the in-process cross-encoder and
+# pulls torch (~500M, far more on Linux w/ CUDA) — kept out of prod/dev images.
+reranker-cohere = ["langchain-cohere>=0.6.0"]
+reranker-voyage = ["langchain-voyageai>=0.4.0"]
+reranker-local = ["sentence-transformers>=3.3.0"]
+# BM25 sparse embedder — used at index time (engine) AND query time (backend).
+sparse = ["fastembed==0.8.0"]
+# spaCy NER + rule-based query parser. The es_core_news_lg wheel is ~600M; only
+# the engine tags speakers/mentions/entities, so this stays out of the backend.
+ner = [
     "spacy>=3.8,<3.9",
     "es-core-news-lg @ https://github.com/explosion/spacy-models/releases/download/es_core_news_lg-3.8.0/es_core_news_lg-3.8.0-py3-none-any.whl",
     "dateparser>=1.2,<2",
-    "langchain-cohere>=0.6.0",
-    "langchain-voyageai>=0.4.0",
-    "langsmith>=0.10",
+]
+
+# --- Profiles: what each deployment installs (self-referential extras) --------
+# backend prod: Novita emb/rerank + OpenAI llm + BM25 query embedding.
+backend = ["qhld-ai[openai,sparse]"]
+# engine prod: the backend set + spaCy tagging.
+engine = ["qhld-ai[openai,ner,sparse]"]
+# shared dev: adds Ollama embeddings; swap in other providers ad-hoc with e.g.
+# `uv pip install qhld-ai[google]`. No torch by default.
+dev = ["qhld-ai[openai,ollama,ner,sparse]"]
+# everything (CI + full local experimentation), including the torch reranker.
+all = [
+    "qhld-ai[openai,ollama,anthropic,google,mistral,reranker-cohere,reranker-voyage,reranker-local,sparse,ner]",
 ]
 
 [build-system]

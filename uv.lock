@@ -2856,25 +2856,81 @@ name = "qhld-ai"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "dateparser" },
-    { name = "es-core-news-lg" },
-    { name = "fastembed" },
-    { name = "langchain-anthropic" },
-    { name = "langchain-cohere" },
+    { name = "httpx" },
     { name = "langchain-core" },
-    { name = "langchain-google-genai" },
-    { name = "langchain-mistralai" },
-    { name = "langchain-ollama" },
-    { name = "langchain-openai" },
-    { name = "langchain-voyageai" },
     { name = "langsmith" },
     { name = "py3langid" },
     { name = "pydantic-settings" },
     { name = "qdrant-client" },
     { name = "qhld-data" },
+    { name = "thefuzz" },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "dateparser" },
+    { name = "es-core-news-lg" },
+    { name = "fastembed" },
+    { name = "langchain-anthropic" },
+    { name = "langchain-cohere" },
+    { name = "langchain-google-genai" },
+    { name = "langchain-mistralai" },
+    { name = "langchain-ollama" },
+    { name = "langchain-openai" },
+    { name = "langchain-voyageai" },
     { name = "sentence-transformers" },
     { name = "spacy" },
-    { name = "thefuzz" },
+]
+anthropic = [
+    { name = "langchain-anthropic" },
+]
+backend = [
+    { name = "fastembed" },
+    { name = "langchain-openai" },
+]
+dev = [
+    { name = "dateparser" },
+    { name = "es-core-news-lg" },
+    { name = "fastembed" },
+    { name = "langchain-ollama" },
+    { name = "langchain-openai" },
+    { name = "spacy" },
+]
+engine = [
+    { name = "dateparser" },
+    { name = "es-core-news-lg" },
+    { name = "fastembed" },
+    { name = "langchain-openai" },
+    { name = "spacy" },
+]
+google = [
+    { name = "langchain-google-genai" },
+]
+mistral = [
+    { name = "langchain-mistralai" },
+]
+ner = [
+    { name = "dateparser" },
+    { name = "es-core-news-lg" },
+    { name = "spacy" },
+]
+ollama = [
+    { name = "langchain-ollama" },
+]
+openai = [
+    { name = "langchain-openai" },
+]
+reranker-cohere = [
+    { name = "langchain-cohere" },
+]
+reranker-local = [
+    { name = "sentence-transformers" },
+]
+reranker-voyage = [
+    { name = "langchain-voyageai" },
+]
+sparse = [
+    { name = "fastembed" },
 ]
 
 [package.dev-dependencies]
@@ -2885,26 +2941,32 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dateparser", specifier = ">=1.2,<2" },
-    { name = "es-core-news-lg", url = "https://github.com/explosion/spacy-models/releases/download/es_core_news_lg-3.8.0/es_core_news_lg-3.8.0-py3-none-any.whl" },
-    { name = "fastembed", specifier = "==0.8.0" },
-    { name = "langchain-anthropic", specifier = "==1.4.8" },
-    { name = "langchain-cohere", specifier = ">=0.6.0" },
+    { name = "dateparser", marker = "extra == 'ner'", specifier = ">=1.2,<2" },
+    { name = "es-core-news-lg", marker = "extra == 'ner'", url = "https://github.com/explosion/spacy-models/releases/download/es_core_news_lg-3.8.0/es_core_news_lg-3.8.0-py3-none-any.whl" },
+    { name = "fastembed", marker = "extra == 'sparse'", specifier = "==0.8.0" },
+    { name = "httpx" },
+    { name = "langchain-anthropic", marker = "extra == 'anthropic'", specifier = "==1.4.8" },
+    { name = "langchain-cohere", marker = "extra == 'reranker-cohere'", specifier = ">=0.6.0" },
     { name = "langchain-core", specifier = "==1.5.0" },
-    { name = "langchain-google-genai", specifier = "==4.2.7" },
-    { name = "langchain-mistralai", specifier = "==1.1.6" },
-    { name = "langchain-ollama", specifier = "==1.1.0" },
-    { name = "langchain-openai", specifier = "==1.4.0" },
-    { name = "langchain-voyageai", specifier = ">=0.4.0" },
+    { name = "langchain-google-genai", marker = "extra == 'google'", specifier = "==4.2.7" },
+    { name = "langchain-mistralai", marker = "extra == 'mistral'", specifier = "==1.1.6" },
+    { name = "langchain-ollama", marker = "extra == 'ollama'", specifier = "==1.1.0" },
+    { name = "langchain-openai", marker = "extra == 'openai'", specifier = "==1.4.0" },
+    { name = "langchain-voyageai", marker = "extra == 'reranker-voyage'", specifier = ">=0.4.0" },
     { name = "langsmith", specifier = ">=0.10" },
     { name = "py3langid", specifier = "==0.3.0" },
     { name = "pydantic-settings", specifier = "==2.14.2" },
     { name = "qdrant-client", specifier = "==1.18.0" },
+    { name = "qhld-ai", extras = ["openai", "ner", "sparse"], marker = "extra == 'engine'" },
+    { name = "qhld-ai", extras = ["openai", "ollama", "anthropic", "google", "mistral", "reranker-cohere", "reranker-voyage", "reranker-local", "sparse", "ner"], marker = "extra == 'all'" },
+    { name = "qhld-ai", extras = ["openai", "ollama", "ner", "sparse"], marker = "extra == 'dev'" },
+    { name = "qhld-ai", extras = ["openai", "sparse"], marker = "extra == 'backend'" },
     { name = "qhld-data", git = "https://github.com/politicalwatch/qhld-data.git?branch=feat%2Fparliamentary-speech-analysis" },
-    { name = "sentence-transformers", specifier = ">=3.3.0" },
-    { name = "spacy", specifier = ">=3.8,<3.9" },
+    { name = "sentence-transformers", marker = "extra == 'reranker-local'", specifier = ">=3.3.0" },
+    { name = "spacy", marker = "extra == 'ner'", specifier = ">=3.8,<3.9" },
     { name = "thefuzz", specifier = "==0.22.1" },
 ]
+provides-extras = ["openai", "ollama", "anthropic", "google", "mistral", "reranker-cohere", "reranker-voyage", "reranker-local", "sparse", "ner", "backend", "engine", "dev", "all"]
 
 [package.metadata.requires-dev]
 dev = [

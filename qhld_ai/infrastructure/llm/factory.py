@@ -21,13 +21,31 @@ def create_llm_from_env(settings: Settings | None = None) -> BaseChatModel:
     return _PROVIDERS[provider](s)
 
 
-# Import providers to trigger registration
-from qhld_ai.infrastructure.llm import (  # noqa: E402, F401
-    anthropic,
-    google,
-    mistral,
-    novita,
-    ollama,
-    openai,
-    vmlx,
+# Import providers to trigger registration. Each adapter imports its
+# langchain-* SDK at module top, so a provider whose SDK isn't installed (a
+# slimmer image built with a subset of the optional extras) is skipped rather
+# than crashing the factory import. Selecting a skipped provider still raises
+# the clear "Unknown provider" ValueError above. A broken *internal* import
+# (a qhld_ai module) is re-raised so real bugs surface.
+import importlib  # noqa: E402
+
+from qhld_ai.logger import get_logger  # noqa: E402
+
+_logger = get_logger(__name__)
+
+
+def _register_available(package: str, modules: tuple[str, ...]) -> None:
+    for name in modules:
+        try:
+            importlib.import_module(f"{package}.{name}")
+        except ImportError as exc:
+            if exc.name and exc.name.startswith("qhld_ai"):
+                raise
+            _logger.debug("skip %s provider %r (SDK not installed): %s",
+                          package, name, exc)
+
+
+_register_available(
+    "qhld_ai.infrastructure.llm",
+    ("anthropic", "google", "mistral", "novita", "ollama", "openai", "vmlx"),
 )
