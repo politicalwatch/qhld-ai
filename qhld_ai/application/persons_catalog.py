@@ -182,19 +182,31 @@ def _type_from_role(role):
 def _bootstrap_entries(speakers, known, threshold):
     """``PersonEntry`` rows for non-deputy speakers, skipping any that already resolve
     to a ``known`` person (a deputy or a curated figure) — that is how a minister who
-    is also a deputy, or an ex-minister already curated, is de-duplicated."""
+    is also a deputy, or an ex-minister already curated, is de-duplicated.
+
+    ONE row per person, keyed on the id: the source is grouped by (speaker, role), so
+    anyone whose office was reworded or who was promoted arrives twice ("Ministro de
+    Economía…" and later "Vicepresidente Primero del Gobierno y Ministro de Economía…").
+    Two entries with identical keys are worse than none — they tie at 100 against every
+    span naming them, and the ambiguity guard drops the mention, so a promotion would
+    silently make a minister unmentionable. Roles that disagree resolve to the more
+    specific type, since a government office is the informative label."""
     from tipi_data.utils import generate_slug
 
-    entries = []
+    by_id = {}
     for row in speakers:
         speaker = row.get("speaker")
         if not speaker or resolve_person(speaker, known, threshold) is not None:
             continue
-        entries.append(make_person_entry(
-            person_id=generate_slug(speaker),
-            person_type=_type_from_role(row.get("role")),
-            name=speaker))
-    return entries
+        person_id = generate_slug(speaker)
+        person_type = _type_from_role(row.get("role"))
+        current = by_id.get(person_id)
+        if current is None:
+            by_id[person_id] = (speaker, person_type)
+        elif person_type == "minister":
+            by_id[person_id] = (current[0], person_type)
+    return [make_person_entry(person_id=person_id, person_type=person_type, name=name)
+            for person_id, (name, person_type) in by_id.items()]
 
 
 def load_person_index(deputies, threshold, *, curated=None, nondeputy_speakers=None,

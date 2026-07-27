@@ -136,3 +136,53 @@ def test_shipped_tag_surfaces_are_out_of_vocabulary():
         for surface in row.get("tag_surfaces", ()):
             assert nlp.vocab[surface.lower()].is_oov, (
                 f"{surface!r} is in-vocabulary, so the adapter will ignore it")
+
+
+# --- bootstrapped non-deputy speakers --------------------------------------
+# The source groups by (speaker, role), so a promoted or reworded office yields the
+# same person twice. Two identical-keyed entries tie at 100 and the ambiguity guard
+# drops the span, i.e. duplication makes a person UNMENTIONABLE.
+
+PROMOTED = [
+    {"speaker": "Cuerpo Caballero, Carlos",
+     "role": "Ministro de Economía, Comercio y Empresa"},
+    {"speaker": "Cuerpo Caballero, Carlos",
+     "role": "Vicepresidente Primero del Gobierno y Ministro de Economía"},
+]
+
+
+def _index(speakers):
+    return load_person_index([], 90, curated=[], nondeputy_speakers=speakers,
+                             deputy_aliases=[])
+
+
+def test_a_person_id_never_appears_twice_in_the_index():
+    index = _index(PROMOTED)
+    ids = [e.person_id for e in index]
+    assert len(ids) == len(set(ids)), f"duplicated person_id: {ids}"
+
+
+def test_a_promoted_minister_stays_resolvable():
+    # The regression this guards: with one entry per role, "señor Cuerpo" tied 2-way
+    # and resolved to None.
+    index = _index(PROMOTED)
+    entry = resolve_person("señor Cuerpo", index, 90)
+    assert entry is not None
+    assert entry.person_id == "cuerpo-caballero-carlos"
+    assert entry.person_type == "minister"
+
+
+def test_the_more_specific_role_wins_when_roles_disagree():
+    # A government office is the informative label, whichever order the rows arrive in.
+    witness_first = [
+        {"speaker": "Pérez Pérez, Ana", "role": "Directora de la Agencia"},
+        {"speaker": "Pérez Pérez, Ana", "role": "Ministra de Sanidad"},
+    ]
+    assert _index(witness_first)[0].person_type == "minister"
+    assert _index(list(reversed(witness_first)))[0].person_type == "minister"
+
+
+def test_a_single_role_speaker_is_unaffected():
+    index = _index([{"speaker": "Pérez Pérez, Ana", "role": "Directora de la Agencia"}])
+    assert [(e.person_id, e.person_type) for e in index] == [
+        ("perez-perez-ana", "official")]
