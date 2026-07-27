@@ -140,9 +140,20 @@ def make_person_entry(person_id, person_type, name, aliases=(), overrides_deputy
         keys=tuple(sorted(keys)), overrides_deputy=overrides_deputy)
 
 
-def build_deputy_index(deputies) -> list[PersonEntry]:
+def build_deputy_index(deputies, *, aliases=None) -> list[PersonEntry]:
     """Build match entries from ``Deputy`` records (``name`` = 'Apellido, Nombre',
-    ``get_fullname()`` = 'Nombre Apellido'). Deputies without a name are skipped."""
+    ``get_fullname()`` = 'Nombre Apellido'). Deputies without a name are skipped.
+
+    ``aliases`` maps a deputy id to the public names the chamber and the press use
+    instead of the official one ("Tesh Sidi" for "Andala Ubbi, Teslem") — a curated
+    surface the mechanical keys above cannot derive, since it shares no token with
+    the catalog name. Each is run through ``normalize_span`` so it matches under the
+    same normalization a queried or NER-extracted surface gets.
+
+    Curate WHOLE public names, never a bare token: ``token_set_ratio`` scores a
+    subset at 100, so "Tesh Sidi" already resolves "Tesh" and "Sidi" on its own,
+    whereas a bare "Sidi" key would also swallow the Moroccan town "Sidi Ifni"."""
+    aliases = aliases or {}
     index = []
     for deputy in deputies:
         name = getattr(deputy, "name", None)
@@ -153,17 +164,19 @@ def build_deputy_index(deputies) -> list[PersonEntry]:
             keys.add(deputy.get_fullname().lower())
         except (AttributeError, IndexError):
             pass
+        for alias in aliases.get(getattr(deputy, "id", None), ()):
+            keys.add(normalize_span(alias))
         index.append(PersonEntry(
             person_id=deputy.id, person_type="deputy", name=name,
             keys=tuple(k for k in keys if k), overrides_deputy=False))
     return index
 
 
-def build_person_index(deputies, extra=()) -> list[PersonEntry]:
+def build_person_index(deputies, extra=(), *, aliases=None) -> list[PersonEntry]:
     """The full match index: every deputy plus ``extra`` non-deputy ``PersonEntry``
     rows (curated catalog + corpus-bootstrapped speakers, assembled at the
     application layer). Scored together in one pass by the resolver."""
-    return build_deputy_index(deputies) + list(extra)
+    return build_deputy_index(deputies, aliases=aliases) + list(extra)
 
 
 # Connective particles inside a surname group ("Muñoz de la Iglesia", "Gil de

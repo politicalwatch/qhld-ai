@@ -3,8 +3,11 @@ payload filters.
 
 The LLM extracts what the user *said* (names, titles, parties, ISO dates); this
 service maps that onto what the index actually *stores*:
-- speaker names -> fuzzy match against the corpus ``speaker`` values ("Apellido,
-  Nombre"), so it works for deputies AND non-deputies (ministers etc.) alike.
+- speaker names -> a curated deputy-alias lookup first (for the deputies the public
+  knows by another name — "Tesh Sidi" for "Andala Ubbi, Teslem" — which shares no
+  token with the catalog entry and so is unreachable by any threshold), then a fuzzy
+  match against the corpus ``speaker`` values ("Apellido, Nombre"), so it works for
+  deputies AND non-deputies (ministers etc.) alike.
 - speaker title -> fuzzy match against the corpus ``role`` values (full office titles).
 - groups/parties -> the payload ``group`` code (== ``ParliamentaryGroup.shortname``),
   resolved from an alias map over group short/long names, party names and a curated
@@ -58,10 +61,14 @@ from pathlib import Path
 
 from thefuzz import fuzz, process
 
-from qhld_ai.application.persons_catalog import load_person_index
+from qhld_ai.application.persons_catalog import (
+    load_deputy_aliases,
+    load_person_index,
+    speaker_alias_map,
+)
 from qhld_ai.domain.entities import normalize_entity
 from qhld_ai.domain.ports.query_parser import ParsedQuery
-from qhld_ai.domain.mentions import PersonMatch, match_person
+from qhld_ai.domain.mentions import PersonMatch, match_person, normalize_span
 
 # token_set_ratio scores a subset match ~100 ("María Jesús Montero" ⊆ "Montero
 # Cuadrado, María Jesús", or a surname-only "Montero") while an unrelated name
@@ -151,23 +158,30 @@ class Resolution:
 
 class EntityResolver:
     def __init__(self, distinct, groups, deputies=None, mention_threshold=90,
-                 curated=None, nondeputy_speakers=None, curated_aliases=None):
+                 curated=None, nondeputy_speakers=None, curated_aliases=None,
+                 deputy_aliases=None):
         """``distinct`` is ``callable(key) -> set`` over the target collection's
         payload; ``groups`` is the list of ``ParliamentaryGroup`` records. ``deputies``
         (the ``Deputy`` catalog) enables resolving mentioned persons; when given, the
         full person index (deputies + curated non-deputies + bootstrapped speakers) is
         built with the SAME assembler used to tag the corpus, so a query resolves to the
         same ids that were indexed. ``curated``/``nondeputy_speakers``/``curated_aliases``
-        may be injected (tests); otherwise they are read from the data files /
-        ``Speeches``. Omit ``deputies`` => mentioned-person queries are left unfiltered."""
+        /``deputy_aliases`` may be injected (tests); otherwise they are read from the
+        data files / ``Speeches``. Omit ``deputies`` => mentioned-person queries are left
+        unfiltered, but curated deputy aliases still serve the speaker path, which needs
+        no catalog."""
         self._distinct = distinct
         if curated_aliases is None:
             curated_aliases = load_curated_group_aliases()
+        if deputy_aliases is None:
+            deputy_aliases = load_deputy_aliases()
         (self._group_aliases, self._group_aliases_normalized,
          self._group_categories) = _build_group_aliases(groups, curated_aliases)
+        self._speaker_aliases = speaker_alias_map(deputy_aliases)
         self._person_index = (
             load_person_index(deputies, mention_threshold,
-                              curated=curated, nondeputy_speakers=nondeputy_speakers)
+                              curated=curated, nondeputy_speakers=nondeputy_speakers,
+                              deputy_aliases=deputy_aliases)
             if deputies else [])
         self._mention_threshold = mention_threshold
 
@@ -194,10 +208,18 @@ class EntityResolver:
 
     def _resolve_speakers(self, result, raws):
         choices = [v for v in self._distinct("speaker") if v]
+        vocab = _speaker_vocab(choices) if self._speaker_aliases else {}
         matched, misses = [], []
         for raw in raws:
-            value, suggestion = self._fuzzy_match(
-                result, "speaker", raw, choices, _SPEAKER_THRESHOLD)
+            # A curated public name ("Tesh Sidi") shares no token with the official
+            # catalog name, so the fuzzy match below can never reach it; try the
+            # alias map first.
+            value, suggestion = self._alias_speaker(raw, vocab), None
+            if value:
+                result.notes.append(f"speaker: '{raw}' → '{value}' (curated alias)")
+            else:
+                value, suggestion = self._fuzzy_match(
+                    result, "speaker", raw, choices, _SPEAKER_THRESHOLD)
             if value:
                 if value not in matched:
                     matched.append(value)
@@ -207,6 +229,17 @@ class EntityResolver:
             _record_unresolved(result, "speaker", raw, blocking=not matched,
                                suggestion=suggestion)
         _set_filter(result, "speaker", matched)
+
+    def _alias_speaker(self, raw, vocab):
+        """The corpus ``speaker`` value a curated public name stands for ("Tesh Sidi"
+        -> "Andala Ubbi, Teslem"), or ``None``.
+
+        The curated canonical name is only used when the corpus vocabulary actually
+        carries it, so a stale curation — or a deputy with no indexed speech — falls
+        through to the fuzzy match and nothing that resolves today changes. The value
+        returned is always the corpus's own string, never the curated spelling."""
+        name = self._speaker_aliases.get(normalize_span(raw)) if vocab else None
+        return vocab.get(normalize_span(name)) if name else None
 
     def _resolve_role(self, result, raw):
         choices = [v for v in self._distinct("role") if v]
@@ -416,6 +449,17 @@ def _set_filter(result, key, matched):
     list (the store treats it as any-of)."""
     if matched:
         result.filters[key] = matched[0] if len(matched) == 1 else sorted(matched)
+
+
+def _speaker_vocab(choices):
+    """``{normalized speaker name: the corpus value}`` — the presence check behind a
+    curated alias. Normalizing both sides absorbs case and comma drift between the
+    curated canonical name and the indexed one; iterating sorted values keeps a
+    (theoretical) normalization collision deterministic rather than set-ordered."""
+    vocab = {}
+    for value in sorted(choices):
+        vocab.setdefault(normalize_span(value), value)
+    return vocab
 
 
 def _strip_accents(text: str) -> str:

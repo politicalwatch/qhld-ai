@@ -48,11 +48,11 @@ DEPUTIES = [
 
 
 def _resolver(**overrides):
-    # curated/nondeputy_speakers/curated_aliases injected → no Mongo/data-file I/O
-    # happens in these unit tests.
+    # curated/nondeputy_speakers/curated_aliases/deputy_aliases injected → no
+    # Mongo/data-file I/O happens in these unit tests.
     defaults = dict(
         distinct=lambda key: CORPUS.get(key, set()), groups=GROUPS, deputies=DEPUTIES,
-        curated=[], nondeputy_speakers=[], curated_aliases=[])
+        curated=[], nondeputy_speakers=[], curated_aliases=[], deputy_aliases=[])
     return EntityResolver(**{**defaults, **overrides})
 
 
@@ -92,6 +92,74 @@ def test_partially_resolved_speakers_keep_the_resolved_one(resolver):
     assert not r.blocked
     assert [(e.field, e.value, e.blocking) for e in r.unresolved] == [
         ("speaker", "Fulano de Tal", False)]
+
+
+# --- curated deputy aliases (public names) ---------------------------------
+# A deputy the public knows by another name than the official one. "Tesh Sidi"
+# shares no token with "Andala Ubbi, Teslem", so it scores far below any usable
+# threshold and is unreachable without curation.
+
+TESLEM = _FakeDeputy("andala-ubbi-teslem", "Andala Ubbi, Teslem")
+TESH_ALIAS = [{"deputy_id": "andala-ubbi-teslem", "name": "Andala Ubbi, Teslem",
+               "aliases": ["Tesh Sidi"]}]
+
+
+def _alias_resolver(**overrides):
+    """Resolver whose corpus has spoken for Teslem and whose alias file is curated."""
+    corpus = {**CORPUS, "speaker": CORPUS["speaker"] | {"Andala Ubbi, Teslem"}}
+    return _resolver(distinct=lambda key: corpus.get(key, set()),
+                     deputies=[*DEPUTIES, TESLEM], deputy_aliases=TESH_ALIAS,
+                     **overrides)
+
+
+def test_speaker_alias_resolves_to_the_canonical_corpus_value():
+    r = _alias_resolver().resolve(
+        ParsedQuery(semantic_query="x", speakers=["Tesh Sidi"]))
+    assert r.filters["speaker"] == "Andala Ubbi, Teslem"
+    assert not r.blocked
+    assert any("curated alias" in note for note in r.notes)
+
+
+def test_speaker_alias_tolerates_honorifics_and_casing():
+    r = _alias_resolver().resolve(
+        ParsedQuery(semantic_query="x", speakers=["la señora TESH SIDI"]))
+    assert r.filters["speaker"] == "Andala Ubbi, Teslem"
+
+
+def test_speaker_alias_falls_through_when_corpus_lacks_that_speaker():
+    # A curated deputy who has not spoken (or a stale curation) must not filter on a
+    # name the corpus never had: the outcome stays exactly what it is today.
+    r = _resolver(deputy_aliases=TESH_ALIAS, deputies=[*DEPUTIES, TESLEM]).resolve(
+        ParsedQuery(semantic_query="x", speakers=["Tesh Sidi"]))
+    assert "speaker" not in r.filters
+    assert r.blocked
+    assert r.unresolved[0].value == "Tesh Sidi"
+
+
+def test_speaker_alias_works_without_the_deputies_catalog():
+    # The speaker path needs no catalog, so a resolver built without one still
+    # honours curated aliases.
+    corpus = {**CORPUS, "speaker": CORPUS["speaker"] | {"Andala Ubbi, Teslem"}}
+    resolver = EntityResolver(
+        distinct=lambda key: corpus.get(key, set()), groups=GROUPS,
+        curated_aliases=[], deputy_aliases=TESH_ALIAS)
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Tesh Sidi"]))
+    assert r.filters["speaker"] == "Andala Ubbi, Teslem"
+
+
+def test_curated_alias_does_not_disturb_fuzzy_speaker_matching():
+    r = _alias_resolver().resolve(
+        ParsedQuery(semantic_query="x", speakers=["Santiago Abascal"]))
+    assert r.filters["speaker"] == "Abascal Conde, Santiago"
+    # still the fuzzy note with its score, not the alias note
+    assert any("(100)" in note for note in r.notes)
+    assert not any("curated alias" in note for note in r.notes)
+
+
+def test_mentioned_person_resolves_via_deputy_alias():
+    r = _alias_resolver().resolve(
+        ParsedQuery(semantic_query="sáhara", mentioned_persons=["Tesh Sidi"]))
+    assert r.filters["mentions"] == "andala-ubbi-teslem"
 
 
 def test_resolves_title_to_role(resolver):
@@ -418,7 +486,8 @@ def test_mentioned_person_ignored_without_deputies_catalog():
     # A resolver built without the catalog knowingly opts out of mention
     # filtering — that must NOT read as an unsatisfiable query.
     resolver = EntityResolver(
-        distinct=lambda key: CORPUS.get(key, set()), groups=GROUPS, curated_aliases=[])
+        distinct=lambda key: CORPUS.get(key, set()), groups=GROUPS, curated_aliases=[],
+        deputy_aliases=[])
     r = resolver.resolve(ParsedQuery(semantic_query="x", mentioned_persons=["Montero"]))
     assert "mentions" not in r.filters
     assert not r.blocked

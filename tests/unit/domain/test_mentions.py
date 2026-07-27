@@ -395,3 +395,59 @@ def test_deputy_wins_tie_over_nonoverride_nondeputy():
     index = build_person_index([deputy], [minister])
     m = resolve_mentions(["Rego"], index, 90)
     assert (m[0].name, m[0].person_type) == ("Rego Candamil, Néstor", "deputy")
+
+
+# --- curated deputy aliases (public names) ---------------------------------
+# The public name of a deputy whose official catalog entry shares no token with it,
+# so no threshold can reach it: it has to be curated.
+
+TESLEM = FakeDeputy("andala-ubbi-teslem", "Andala Ubbi, Teslem")
+TESH = {"andala-ubbi-teslem": ["Tesh Sidi"]}
+
+
+def test_alias_resolves_a_mention_to_the_deputy():
+    index = build_deputy_index([TESLEM], aliases=TESH)
+    mention = resolve_mentions(["Tesh Sidi"], index, 90)[0]
+    assert (mention.name, mention.person_id, mention.person_type) == (
+        "Andala Ubbi, Teslem", "andala-ubbi-teslem", "deputy")
+
+
+def test_alias_matches_under_the_same_normalization_as_any_span():
+    index = build_deputy_index([TESLEM], aliases=TESH)
+    assert resolve_person("la señora Tesh Sidi", index, 90).person_id == "andala-ubbi-teslem"
+    assert resolve_person("TESH SIDI", index, 90).person_id == "andala-ubbi-teslem"
+
+
+def test_alias_and_official_surfaces_collapse_into_one_mention():
+    index = build_deputy_index([TESLEM], aliases=TESH)
+    mentions = resolve_mentions(["Tesh Sidi", "Andala Ubbi"], index, 90)
+    assert len(mentions) == 1
+    assert mentions[0].count == 2
+    assert mentions[0].surface_forms == ["Andala Ubbi", "Tesh Sidi"]
+
+
+def test_index_is_unchanged_when_no_aliases_are_given():
+    # The engine builds the index without aliases; that path must stay as it was.
+    assert build_deputy_index([TESLEM]) == build_deputy_index([TESLEM], aliases={})
+    assert resolve_mentions(["Tesh Sidi"], build_deputy_index([TESLEM]), 90) == []
+
+
+def test_alias_for_an_unknown_deputy_id_is_a_no_op():
+    index = build_deputy_index([TESLEM], aliases={"someone-else": ["Whoever"]})
+    assert index == build_deputy_index([TESLEM])
+
+
+def test_whole_public_name_covers_its_parts_without_swallowing_a_homonym():
+    # token_set_ratio scores a subset at 100, so the curated full name already
+    # resolves its parts — which is why aliases are curated whole: a bare "Sidi" key
+    # would also match the Moroccan town "Sidi Ifni", a real corpus surface.
+    index = build_deputy_index([TESLEM], aliases=TESH)
+    assert resolve_person("Tesh", index, 90).person_id == "andala-ubbi-teslem"
+    assert resolve_person("Sidi", index, 90).person_id == "andala-ubbi-teslem"
+    assert resolve_person("Sidi Ifni", index, 90) is None
+
+
+def test_build_person_index_threads_aliases():
+    minister = make_person_entry("sira-rego", "minister", "Rego, Sira Abed")
+    index = build_person_index([TESLEM], [minister], aliases=TESH)
+    assert resolve_person("Tesh Sidi", index, 90).person_id == "andala-ubbi-teslem"
