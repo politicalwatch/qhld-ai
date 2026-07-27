@@ -154,3 +154,48 @@ def test_gazetteer_does_not_break_up_model_spans():
     spans = seeded.person_spans(text)
     assert "Reyes Maroto" in spans
     assert "Maroto" not in spans
+
+
+# --- courtesy words are absorbed into the span -----------------------------
+# The model folds "señor"/"señora" in only sometimes, and the courtesy form carries the
+# gender that tells two holders of a surname apart — so the adapter makes it uniform.
+
+def _ner(**kw):
+    from qhld_ai.infrastructure.config.settings import Settings
+    from qhld_ai.infrastructure.ner.factory import create_ner_from_env
+
+    return create_ner_from_env(Settings(), **kw)
+
+
+def test_courtesy_word_is_absorbed_into_the_span():
+    spans = _ner().person_spans("Coincido con la señora Montero en ese punto.")
+    assert "señora Montero" in spans
+    # the article stays outside: "la" is nobody's name, and the span doubles as the
+    # highlight target on the site
+    assert not any(s.startswith("la ") or s.startswith("La ") for s in spans)
+
+
+def test_courtesy_word_absorbed_for_a_gazetteer_rescued_surname():
+    # The rescued path is where it matters most: a bare one-token match would otherwise
+    # never carry the cue.
+    spans = _ner(gazetteer=["Vallugera"]).person_spans(
+        "Ha intervenido la señora Vallugera esta mañana.")
+    assert "señora Vallugera" in spans
+
+
+def test_a_name_without_a_courtesy_word_is_unchanged():
+    spans = _ner().person_spans("Pedro Sánchez compareció ante el Pleno.")
+    assert any(s == "Pedro Sánchez" for s in spans)
+
+
+def test_abbreviated_courtesy_form_is_absorbed():
+    # "Sra." tokenizes as "Sra" + "."; both are stepped over.
+    spans = _ner(gazetteer=["Vallugera"]).person_spans("Lo dijo la Sra. Vallugera ayer.")
+    assert any("Vallugera" in s and "Sra" in s for s in spans)
+
+
+def test_a_role_word_is_not_absorbed():
+    # Only courtesy forms, which inflect for gender. A role word would change what the
+    # span means, not merely how polite it is.
+    spans = _ner().person_spans("El ministro Bolaños respondió.")
+    assert not any("ministro" in s for s in spans)

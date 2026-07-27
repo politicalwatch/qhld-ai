@@ -29,6 +29,14 @@ from qhld_ai.domain.ports.ner import NerPort
 
 from .factory import _register
 
+# Courtesy words a PER span is extended over, so the gender they carry is always
+# available to the resolver. Kept to the forms that actually inflect for gender —
+# a role word ("ministro") would change the span's meaning, not just its politeness.
+_COURTESY_WORDS = frozenset({
+    "señor", "señora", "señores", "señoras", "sr", "sra", "srs", "sras",
+    "don", "doña",
+})
+
 
 class SpacyNer(NerPort):
     def __init__(self, settings, gazetteer=None):
@@ -77,14 +85,33 @@ class SpacyNer(NerPort):
         return [(start, end) for _, start, end in self._matcher(doc)
                 if not any(s < end and start < e for s, e in per)]
 
+    def _with_courtesy(self, doc, start: int) -> int:
+        """``start`` extended left over an adjacent courtesy word, if there is one.
+
+        The model folds "señor"/"señora" into a PER span only sometimes — "señor Torres"
+        but a bare "Rego" where the text reads "la señora Rego" — and that inconsistency
+        loses real information: the courtesy form agrees in gender with the person named,
+        which is what lets the resolver tell two holders of a surname apart. Including it
+        uniformly is what makes that cue dependable.
+
+        The definite article is deliberately NOT absorbed: "la" is not part of anyone's
+        name, the gender is already carried by "señora", and the span doubles as the
+        highlight target on the site, so it should start at the courtesy word."""
+        probe = start - 1
+        if probe >= 0 and doc[probe].text == ".":      # "Sra." tokenizes as "Sra" + "."
+            probe -= 1
+        if probe >= 0 and doc[probe].text.lower().rstrip(".") in _COURTESY_WORDS:
+            return probe
+        return start
+
     def person_spans(self, text: str) -> list[str]:
         if not text:
             return []
         doc = self._doc(text)
-        spans = [(ent.start, ent.end, ent.text)
-                 for ent in doc.ents if ent.label_ == "PER"]
-        spans.extend(
-            (start, end, doc[start:end].text) for start, end in self._rescued(doc))
+        bounds = [(ent.start, ent.end) for ent in doc.ents if ent.label_ == "PER"]
+        bounds.extend(self._rescued(doc))
+        spans = [(start, end, doc[self._with_courtesy(doc, start):end].text)
+                 for start, end in bounds]
         spans.sort()
         return [span_text for _, _, span_text in spans]
 
