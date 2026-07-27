@@ -62,9 +62,9 @@ from pathlib import Path
 from thefuzz import fuzz, process
 
 from qhld_ai.application.persons_catalog import (
+    alias_index,
     load_deputy_aliases,
     load_person_index,
-    speaker_alias_map,
 )
 from qhld_ai.domain.entities import normalize_entity
 from qhld_ai.domain.ports.query_parser import ParsedQuery
@@ -177,7 +177,7 @@ class EntityResolver:
             deputy_aliases = load_deputy_aliases()
         (self._group_aliases, self._group_aliases_normalized,
          self._group_categories) = _build_group_aliases(groups, curated_aliases)
-        self._speaker_aliases = speaker_alias_map(deputy_aliases)
+        self._alias_index = alias_index(deputy_aliases)
         self._person_index = (
             load_person_index(deputies, mention_threshold,
                               curated=curated, nondeputy_speakers=nondeputy_speakers,
@@ -208,7 +208,7 @@ class EntityResolver:
 
     def _resolve_speakers(self, result, raws):
         choices = [v for v in self._distinct("speaker") if v]
-        vocab = _speaker_vocab(choices) if self._speaker_aliases else {}
+        vocab = _speaker_vocab(choices) if self._alias_index else {}
         matched, misses = [], []
         for raw in raws:
             # A curated public name ("Tesh Sidi") shares no token with the official
@@ -231,15 +231,22 @@ class EntityResolver:
         _set_filter(result, "speaker", matched)
 
     def _alias_speaker(self, raw, vocab):
-        """The corpus ``speaker`` value a curated public name stands for ("Tesh Sidi"
-        -> "Andala Ubbi, Teslem"), or ``None``.
+        """The corpus ``speaker`` value a curated public name stands for ("Tesh Sidi",
+        "Tesh", "Tesh Sidí" -> "Andala Ubbi, Teslem"), or ``None``.
 
-        The curated canonical name is only used when the corpus vocabulary actually
+        Matched with the SAME ``match_person`` the mentions path uses, against an index
+        of aliases only — so an alias resolves identically however the user typed it,
+        and an official name or surname (which scores ~0 against alias-only keys) falls
+        straight through to the fuzzy match below.
+
+        The curated canonical name is used only when the corpus vocabulary actually
         carries it, so a stale curation — or a deputy with no indexed speech — falls
-        through to the fuzzy match and nothing that resolves today changes. The value
-        returned is always the corpus's own string, never the curated spelling."""
-        name = self._speaker_aliases.get(normalize_span(raw)) if vocab else None
-        return vocab.get(normalize_span(name)) if name else None
+        through too, and nothing that resolves today changes. The value returned is
+        always the corpus's own string, never the curated spelling."""
+        if not vocab:
+            return None
+        match = match_person(raw, self._alias_index, self._mention_threshold)
+        return vocab.get(normalize_span(match.entry.name)) if match.entry else None
 
     def _resolve_role(self, result, raw):
         choices = [v for v in self._distinct("role") if v]

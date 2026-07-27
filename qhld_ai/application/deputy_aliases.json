@@ -2,6 +2,7 @@
   {
     "deputy_id": "andala-ubbi-teslem",
     "name": "Andala Ubbi, Teslem",
-    "aliases": ["Tesh Sidi"]
+    "aliases": ["Tesh Sidi"],
+    "tag_surfaces": ["Tesh"]
   }
 ]

@@ -451,3 +451,20 @@ def test_build_person_index_threads_aliases():
     minister = make_person_entry("sira-rego", "minister", "Rego, Sira Abed")
     index = build_person_index([TESLEM], [minister], aliases=TESH)
     assert resolve_person("Tesh Sidi", index, 90).person_id == "andala-ubbi-teslem"
+
+
+def test_gazetteer_takes_curated_public_names_verbatim():
+    # A nickname has no surname group to count as distinctive, so curated surfaces go
+    # in as given — the alias keys in the index have nothing to resolve unless the NER
+    # spans them first.
+    terms = build_surname_gazetteer([TESLEM], extra=["Tesh"])
+    assert "Tesh" in terms
+    assert terms == sorted(terms)
+    # and it changes nothing when nothing is curated
+    assert build_surname_gazetteer([TESLEM]) == build_surname_gazetteer(
+        [TESLEM], extra=[])
+
+
+def test_gazetteer_curated_surface_does_not_displace_a_surname():
+    terms = build_surname_gazetteer([TESLEM], extra=["Tesh"])
+    assert "Andala" in terms and "Ubbi" in terms

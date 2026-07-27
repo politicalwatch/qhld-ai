@@ -185,7 +185,7 @@ _SURNAME_PARTICLES = {
     "de", "del", "la", "las", "los", "y", "e", "i", "da", "dos", "san", "santa"}
 
 
-def build_surname_gazetteer(deputies) -> list[str]:
+def build_surname_gazetteer(deputies, *, extra=()) -> list[str]:
     """Distinctive surname surfaces to seed an NER gazetteer, so the model also tags
     the uncommon/compound surnames it otherwise misses. The WHOLE surname group
     contributes tokens — the chamber knows some deputies by their second surname
@@ -199,6 +199,16 @@ def build_surname_gazetteer(deputies) -> list[str]:
     Tokens ambiguous even then ("García") are left out: the base model usually
     catches common ones, and they would only add spans the resolver drops anyway.
     Original casing is kept (names are Title-case in the Diario text).
+
+    ``extra`` adds curated surfaces that no surname can produce — the public name a
+    deputy is actually called in the chamber ("Tesh" for Andala Ubbi, Teslem). Those go
+    in verbatim, bypassing the distinctiveness counting above (a nickname has no
+    surname group to count), which is safe because they are hand-curated and still face
+    the adapter's out-of-vocabulary gate. They must not NEST with each other or with a
+    surname, though: two patterns matching the same text yield two overlapping spans and
+    count one written mention twice. Note this list is about TAGGING only — being
+    taggable and being a resolution key are separate decisions, curated separately (see
+    ``application.persons_catalog``).
 
     False-positive exposure stays low downstream: the spaCy adapter only turns
     OUT-OF-VOCABULARY terms into entity-ruler patterns (a common word that doubles as
@@ -222,6 +232,10 @@ def build_surname_gazetteer(deputies) -> list[str]:
             surface.setdefault(token.lower(), token)
         for token in _tokens(first_surname):
             first[token.lower()] += 1
+    for term in extra:
+        if term:
+            surface.setdefault(term.lower(), term)
+            total[term.lower()] = 1  # curated => distinctive by construction
     return sorted(surface[key] for key, count in total.items()
                   if count == 1 or first[key] == 1)
 
