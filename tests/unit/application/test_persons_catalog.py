@@ -7,9 +7,11 @@ part of this feature no code change can protect, so its invariants are asserted 
 import pytest
 
 from qhld_ai.application.persons_catalog import (
+    _gender_from_role,
     alias_index,
     deputy_aliases_by_id,
     gazetteer_surfaces,
+    load_curated,
     load_deputy_aliases,
     load_person_index,
 )
@@ -186,3 +188,79 @@ def test_a_single_role_speaker_is_unaffected():
     index = _index([{"speaker": "Pérez Pérez, Ana", "role": "Directora de la Agencia"}])
     assert [(e.person_id, e.person_type) for e in index] == [
         ("perez-perez-ana", "official")]
+
+
+# --- gender, from the grammatical gender of the office ----------------------
+# The corpus carries no gender field for non-deputy speakers, so their office title is
+# the only source — and they are precisely the people who collide with a deputy surname.
+
+@pytest.mark.parametrize("role, expected", [
+    ("Ministra de Juventud e Infancia", "Mujer"),
+    ("Ministro de Economía, Comercio y Empresa", "Hombre"),
+    ("Vicepresidenta Tercera y Ministra para la Transición Ecológica", "Mujer"),
+    ("Vicepresidente Primero del Gobierno y Ministro de Economía", "Hombre"),
+    ("Presidenta del Congreso de los Diputados", "Mujer"),
+    ("Presidente del Gobierno", "Hombre"),
+    ("Directora de la Agencia", "Mujer"),
+    ("Alcaldesa de Madrid", "Mujer"),
+    # the corpus really does distinguish these two, so they carry gender as well
+    ("Diputada", "Mujer"),
+    ("Diputado", "Hombre"),
+    # unknown or genderless in form => no signal at all
+    ("Compareciente", None),
+    ("", None),
+    (None, None),
+])
+def test_gender_from_role(role, expected):
+    assert _gender_from_role(role) == expected
+
+
+def test_a_masculine_title_does_not_match_inside_its_feminine_form():
+    # "alcalde" is a prefix of "alcaldesa"; the word boundary is what keeps them apart.
+    assert _gender_from_role("Alcaldesa de Valencia") == "Mujer"
+    assert _gender_from_role("Directora General") == "Mujer"
+
+
+def test_a_trailing_office_does_not_override_the_leading_one():
+    # Matched at the start, so the first title names the holder.
+    assert _gender_from_role(
+        "Vicepresidenta Primera del Gobierno y Ministro de Hacienda") == "Mujer"
+
+
+def test_bootstrapped_speaker_carries_the_gender_of_its_office():
+    index = _index(PROMOTED)
+    assert index[0].gender == "Hombre"
+
+
+def test_gender_is_taken_from_whichever_role_states_it():
+    rows = [
+        {"speaker": "Pérez Pérez, Ana", "role": "Compareciente"},
+        {"speaker": "Pérez Pérez, Ana", "role": "Ministra de Sanidad"},
+    ]
+    assert _index(rows)[0].gender == "Mujer"
+    assert _index(list(reversed(rows)))[0].gender == "Mujer"
+
+
+def test_contradicting_roles_drop_the_gender_rather_than_guess():
+    # Disagreement means the data is wrong; unknown merely disables the gender filter,
+    # whereas picking a side would resolve spans to the wrong person.
+    rows = [
+        {"speaker": "Pérez Pérez, Ana", "role": "Ministra de Sanidad"},
+        {"speaker": "Pérez Pérez, Ana", "role": "Ministro de Sanidad"},
+    ]
+    assert _index(rows)[0].gender is None
+
+
+def test_curated_records_thread_their_gender():
+    curated = [{"person_id": "x", "person_type": "former_pm", "name": "Aznar López, José",
+                "aliases": ["Aznar"], "gender": "Hombre"}]
+    index = load_person_index([], 90, curated=curated, nondeputy_speakers=[],
+                              deputy_aliases=[])
+    assert index[0].gender == "Hombre"
+
+
+def test_shipped_curated_catalog_declares_a_gender_for_everyone():
+    # Hand-edited file: gender is what lets a courtesy form rule these people out, and a
+    # record added without it silently loses that. Only code can enforce it.
+    for row in load_curated():
+        assert row.get("gender") in ("Hombre", "Mujer"), row["person_id"]

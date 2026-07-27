@@ -65,6 +65,7 @@ deputies list is passed into the domain today.
 """
 
 import json
+import re
 from pathlib import Path
 
 from qhld_ai.domain.mentions import (
@@ -164,7 +165,8 @@ def _curated_entries(curated):
             person_type=row["person_type"],
             name=row["name"],
             aliases=row.get("aliases", ()),
-            overrides_deputy=row.get("overrides_deputy", False))
+            overrides_deputy=row.get("overrides_deputy", False),
+            gender=row.get("gender"))
         for row in curated
     ]
 
@@ -179,6 +181,39 @@ def _type_from_role(role):
     return "official"
 
 
+# Spanish office titles agree in gender with their holder, so the role a speaker is
+# recorded under identifies them: "Ministra de Juventud e Infancia" is Sira Rego, not
+# the deputy Néstor Rego. This is the only gender source for bootstrapped speakers —
+# they come from the corpus, which carries no gender field — and it matters because
+# ministers are exactly the people who collide with a deputy's surname. Matched at the
+# START of the role so a trailing office ("…y Ministro de Economía") cannot override the
+# leading one, and only for titles whose masculine/feminine forms actually differ.
+_FEMININE_ROLE = re.compile(
+    r"^\s*(?:ministra|vicepresidenta|presidenta|secretaria|directora|delegada|"
+    r"comisionada|consejera|alcaldesa|interventora|subsecretaria|diputada)\b", re.I)
+_MASCULINE_ROLE = re.compile(
+    r"^\s*(?:ministro|vicepresidente|presidente|secretario|director|delegado|"
+    r"comisionado|consejero|alcalde|interventor|subsecretario|diputado)\b", re.I)
+
+
+def _gender_from_role(role):
+    """"Mujer"/"Hombre" from the grammatical gender of a speaker's office, or ``None``
+    when the title is unrecognised or gender-neutral in form ("Compareciente").
+
+    ``diputado``/``diputada`` are included because the corpus really does distinguish
+    them (2091 vs 1405 speeches), so a bootstrapped former deputy gets a gender too.
+
+    The trailing ``\\b`` is what keeps a pair apart where one form is a prefix of the
+    other: "alcalde" cannot match inside "Alcaldesa", because the boundary fails on the
+    following "s". Order is therefore not load-bearing."""
+    text = role or ""
+    if _FEMININE_ROLE.match(text):
+        return "Mujer"
+    if _MASCULINE_ROLE.match(text):
+        return "Hombre"
+    return None
+
+
 def _bootstrap_entries(speakers, known, threshold):
     """``PersonEntry`` rows for non-deputy speakers, skipping any that already resolve
     to a ``known`` person (a deputy or a curated figure) — that is how a minister who
@@ -190,7 +225,12 @@ def _bootstrap_entries(speakers, known, threshold):
     Two entries with identical keys are worse than none — they tie at 100 against every
     span naming them, and the ambiguity guard drops the mention, so a promotion would
     silently make a minister unmentionable. Roles that disagree resolve to the more
-    specific type, since a government office is the informative label."""
+    specific type, since a government office is the informative label.
+
+    ``gender`` comes from the grammatical gender of the office (``_gender_from_role``).
+    Across a person's several roles it is taken wherever it is known; if two roles
+    genuinely disagree the gender is dropped back to unknown, which merely disables the
+    gender filter for them rather than betting on the wrong half of a contradiction."""
     from tipi_data.utils import generate_slug
 
     by_id = {}
@@ -200,13 +240,21 @@ def _bootstrap_entries(speakers, known, threshold):
             continue
         person_id = generate_slug(speaker)
         person_type = _type_from_role(row.get("role"))
+        gender = _gender_from_role(row.get("role"))
         current = by_id.get(person_id)
         if current is None:
-            by_id[person_id] = (speaker, person_type)
-        elif person_type == "minister":
-            by_id[person_id] = (current[0], person_type)
-    return [make_person_entry(person_id=person_id, person_type=person_type, name=name)
-            for person_id, (name, person_type) in by_id.items()]
+            by_id[person_id] = (speaker, person_type, gender)
+            continue
+        name, current_type, current_gender = current
+        if current_gender and gender and current_gender != gender:
+            gender = None
+        else:
+            gender = current_gender or gender
+        by_id[person_id] = (
+            name, person_type if person_type == "minister" else current_type, gender)
+    return [make_person_entry(person_id=person_id, person_type=person_type, name=name,
+                              gender=gender)
+            for person_id, (name, person_type, gender) in by_id.items()]
 
 
 def load_person_index(deputies, threshold, *, curated=None, nondeputy_speakers=None,

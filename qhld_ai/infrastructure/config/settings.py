@@ -115,6 +115,11 @@ class Settings(BaseSettings):
     # every non-PER span is emitted (the raw model output).
     ner_entity_pos_gate: bool = True
     mention_match_threshold: int = 90
+    # Let a gendered courtesy form decide a surname two catalog people share: "la señora
+    # Muñoz" is the female Muñoz, so the ambiguity guard need not drop it. Evidence is
+    # pooled per speech, so one such form settles every bare occurrence of that surname in
+    # it. Off => shared surnames are dropped unless a fuller form disambiguates them.
+    mention_gender_gate: bool = True
 
 
 @lru_cache

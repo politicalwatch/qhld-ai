@@ -45,6 +45,25 @@ _HONORIFICS = {
 _PUNCT_RE = re.compile(r"[^\w\s-]", re.UNICODE)
 _MIN_LEN = 3
 
+# The gendered half of the same courtesy vocabulary. ``normalize_span`` throws these
+# away before matching, but the courtesy form agrees in gender with the person named,
+# so read it off the RAW span first: "la señora Muñoz" cannot be the male Muñoz. Values
+# are the person catalog's own ("Hombre"/"Mujer") so no translation layer is needed.
+_FEMININE_CUE = re.compile(r"\b(?:se[nñ]ora|se[nñ]oras|sra|sras|do[nñ]a)\b", re.I)
+_MASCULINE_CUE = re.compile(r"\b(?:se[nñ]or|se[nñ]ores|sr|srs|don)\b", re.I)
+
+
+def span_gender(span: str) -> str | None:
+    """The gender the span's courtesy form implies, or ``None`` when it carries none (a
+    bare "Muñoz") or is self-contradictory. Feminine is tested first because "señora"
+    contains "señor" as a prefix, not as a word — the word boundaries keep them apart,
+    but the order makes that independent of the regex engine's behaviour."""
+    feminine = bool(_FEMININE_CUE.search(span or ""))
+    masculine = bool(_MASCULINE_CUE.search(span or ""))
+    if feminine == masculine:  # neither, or a span carrying both
+        return None
+    return "Mujer" if feminine else "Hombre"
+
 # Common words spaCy sometimes tags as a person because they are also borne as a
 # surname (typically sentence-initial "Bueno, …"). They never name a real person.
 # (Famous non-deputies who share a surname with a deputy — Aznar, Suárez, Clavijo —
@@ -107,12 +126,45 @@ class PersonEntry:
     against (full "apellido, nombre", "nombre apellido", the bare surname, and any
     explicit aliases). ``person_type`` is ``"deputy"`` for catalog deputies, else the
     non-deputy kind. ``overrides_deputy`` marks a non-deputy who should win a tie
-    against a deputy sharing the surname (e.g. "Clavijo")."""
+    against a deputy sharing the surname (e.g. "Clavijo").
+
+    ``gender`` ("Hombre"/"Mujer", the catalog's own vocabulary) lets a gendered courtesy
+    form in the span rule this person out: "la señora Muñoz" cannot be the male Muñoz.
+    ``None`` means unknown and never rules anybody out — see ``_gender_conflicts``."""
     person_id: str
     person_type: str
     name: str
     keys: tuple[str, ...]
     overrides_deputy: bool = False
+    gender: str | None = None
+
+
+def _gender_conflicts(cue: str | None, entry: PersonEntry) -> bool:
+    """Whether ``cue`` rules this person out. Unknown on either side never rules anyone
+    out — the catalog has no gender for most bootstrapped speakers, and treating that as
+    a mismatch would drop resolutions that work today."""
+    return bool(cue) and bool(entry.gender) and cue != entry.gender
+
+
+def _narrow_by_gender(cue: str | None, tied: list[PersonEntry]) -> list[PersonEntry]:
+    """Drop candidates the courtesy form contradicts, unless that would leave nothing —
+    an all-conflicting tie means the cue or the catalog is wrong, so keep the tie intact
+    and let the ambiguity guard have the last word rather than inventing a winner."""
+    kept = [e for e in tied if not _gender_conflicts(cue, e)]
+    return kept if kept else tied
+
+
+def _names_a_surname(norm: str, tied: list[PersonEntry]) -> bool:
+    """Whether the span names a SURNAME of any tied candidate rather than a bare given
+    name — the precondition for letting gender decide.
+
+    Given names are the ambiguity guard's most valuable catch: "Pedro", "Laura",
+    "Alberto" each tie a dozen people and name none of them, and a courtesy form does
+    nothing to say which ("el señor Amador" is Alberto Amador, not the deputy whose GIVEN
+    name is Amador). Measured on the gold set: without this, "Alberto" resolves to Fabra
+    Part, Alberto — a false positive."""
+    span_tokens = _tokens(norm)
+    return any(span_tokens & _first_surname_tokens(e.name) for e in tied)
 
 
 def _name_keys(name: str) -> set[str]:
@@ -125,7 +177,8 @@ def _name_keys(name: str) -> set[str]:
     return {k for k in keys if k}
 
 
-def make_person_entry(person_id, person_type, name, aliases=(), overrides_deputy=False):
+def make_person_entry(person_id, person_type, name, aliases=(), overrides_deputy=False,
+                      gender=None):
     """Build a non-deputy ``PersonEntry``. Keys come from the canonical ``name`` plus
     any ``aliases`` (nicknames, bare surname, role phrases like "su majestad"), each
     run through ``normalize_span`` so they match under the same normalization the
@@ -137,7 +190,7 @@ def make_person_entry(person_id, person_type, name, aliases=(), overrides_deputy
             keys.add(norm)
     return PersonEntry(
         person_id=person_id, person_type=person_type, name=name,
-        keys=tuple(sorted(keys)), overrides_deputy=overrides_deputy)
+        keys=tuple(sorted(keys)), overrides_deputy=overrides_deputy, gender=gender)
 
 
 def build_deputy_index(deputies, *, aliases=None) -> list[PersonEntry]:
@@ -168,7 +221,10 @@ def build_deputy_index(deputies, *, aliases=None) -> list[PersonEntry]:
             keys.add(normalize_span(alias))
         index.append(PersonEntry(
             person_id=deputy.id, person_type="deputy", name=name,
-            keys=tuple(k for k in keys if k), overrides_deputy=False))
+            keys=tuple(k for k in keys if k), overrides_deputy=False,
+            # getattr, not deputy.gender: callers duck-type this record (the query path
+            # and the tests pass their own minimal stand-ins).
+            gender=getattr(deputy, "gender", None)))
     return index
 
 
@@ -307,13 +363,18 @@ def match_person(name: str, index: list[PersonEntry], threshold: int) -> PersonM
     return _match_one(norm, index, threshold)
 
 
-def _resolve_one(norm: str, index: list[PersonEntry], threshold: int):
+def _resolve_one(norm: str, index: list[PersonEntry], threshold: int, gender=None):
     """Best-scoring person for a normalized span, or ``None`` when nothing clears the
     threshold or the top score stays shared after tie-breaking (ambiguous surname)."""
-    return _match_one(norm, index, threshold).entry
+    return _match_one(norm, index, threshold, gender=gender).entry
 
 
-def _match_one(norm: str, index: list[PersonEntry], threshold: int) -> PersonMatch:
+def _match_one(norm: str, index: list[PersonEntry], threshold: int,
+               gender=None) -> PersonMatch:
+    """``gender`` is the courtesy form's gender read off the RAW span (see
+    ``span_gender``), which ``norm`` has already had stripped. It only ever removes
+    candidates the form contradicts, so passing ``None`` — as every query-side caller
+    does — leaves the outcome exactly as it was before gender existed."""
     best_score = 0
     tied: list[PersonEntry] = []
     for entry in index:
@@ -324,6 +385,12 @@ def _match_one(norm: str, index: list[PersonEntry], threshold: int) -> PersonMat
             tied.append(entry)
     if best_score < threshold:
         return PersonMatch(None, best_score, [e.name for e in tied])
+    if len(tied) > 1 and gender and _names_a_surname(norm, tied):
+        # Before any preference rule: a gendered courtesy form is a hard fact about who is
+        # being named, so it outranks the deputy preference below. Without this, "la señora
+        # Rego, ministra de Juventud" ties the minister Sira Rego with the deputy Néstor
+        # Rego and the deputy preference hands it to HIM.
+        tied = _narrow_by_gender(gender, tied)
     if len(tied) > 1:
         # An override only applies when the span names the override's OWN first surname —
         # not when it merely shares a secondary token (the ex-PM "Aznar López" must not
@@ -387,9 +454,31 @@ def _is_excluded(norm: str, entry: PersonEntry, excluded: frozenset[str]) -> boo
     return not (span_tokens & first)
 
 
+def _gender_cues(spans) -> dict[str, str]:
+    """Map each normalized surface to the gender its courtesy forms agree on, over the
+    WHOLE speech.
+
+    A speech addresses the same person both ways — "la señora Muñoz" once and a bare
+    "Muñoz" thirty times — and ``normalize_span`` collapses those to one surface. Reading
+    the cue per occurrence would rescue only the handful that carry the honorific, so the
+    evidence is pooled per surface instead: one courtesy form anywhere in the speech
+    settles who that surname refers to throughout it.
+
+    Surfaces whose forms disagree are left out entirely — two genders on one surname mean
+    it names two different people, which is exactly when nothing should be assumed."""
+    seen: dict[str, set[str]] = {}
+    for span in spans:
+        norm = normalize_span(span)
+        cue = span_gender(span) if norm else None
+        if cue:
+            seen.setdefault(norm, set()).add(cue)
+    return {norm: next(iter(cues)) for norm, cues in seen.items() if len(cues) == 1}
+
+
 def resolve_mentions(
     spans, index: list[PersonEntry], threshold: int,
-    excluded_surnames: frozenset[str] = frozenset()) -> list[Mention]:
+    excluded_surnames: frozenset[str] = frozenset(), *,
+    gender_gate: bool = True) -> list[Mention]:
     """Collapse raw NER ``spans`` (duplicates preserved) into canonical ``Mention``s.
 
     Each span is normalized then resolved (cached per normalized form). Occurrences
@@ -397,7 +486,12 @@ def resolve_mentions(
     ``surface_forms`` keeps the distinct raw spans seen. ``excluded_surnames`` drops
     spans that name a flagged non-deputy homonym of a DEPUTY (see ``_is_excluded``);
     it never touches a resolved non-deputy. Returns mentions ordered by descending
-    count then name."""
+    count then name.
+
+    ``gender_gate`` lets a gendered courtesy form settle a surname the ambiguity guard
+    would otherwise drop ("la señora Muñoz" is the female Muñoz). It is speech-scoped —
+    hence computed here, where the whole span list is in hand, rather than per span."""
+    cues = _gender_cues(spans) if gender_gate else {}
     cache: dict[str, PersonEntry | None] = {}
     by_person: dict[str, dict] = {}
     for span in spans:
@@ -405,7 +499,8 @@ def resolve_mentions(
         if not norm:
             continue
         if norm not in cache:
-            cache[norm] = _resolve_one(norm, index, threshold)
+            cache[norm] = _resolve_one(
+                norm, index, threshold, gender=cues.get(norm))
         entry = cache[norm]
         if entry is None:
             continue

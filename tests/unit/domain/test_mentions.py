@@ -1,7 +1,8 @@
 """Unit tests for pure mention resolution — no I/O, no spaCy.
 
 Feeds raw NER-style spans + a fake deputy catalog through the resolver and asserts
-the canonicalization, dedupe/count, honorific stripping and ambiguity guard.
+the canonicalization, dedupe/count, honorific stripping, ambiguity guard, and the
+gendered-courtesy-form gate that lets a shared surname resolve after all.
 """
 
 import pytest
@@ -17,6 +18,7 @@ from qhld_ai.domain.mentions import (
     normalize_span,
     resolve_mentions,
     resolve_person,
+    span_gender,
 )
 
 pytestmark = pytest.mark.unit
@@ -25,9 +27,10 @@ pytestmark = pytest.mark.unit
 class FakeDeputy:
     """Duck-types the bits of tipi_data ``Deputy`` the index needs."""
 
-    def __init__(self, id, name):
+    def __init__(self, id, name, gender=None):
         self.id = id
         self.name = name
+        self.gender = gender
 
     def get_fullname(self):
         surname, given = (p.strip() for p in self.name.split(","))
@@ -468,3 +471,141 @@ def test_gazetteer_takes_curated_public_names_verbatim():
 def test_gazetteer_curated_surface_does_not_displace_a_surname():
     terms = build_surname_gazetteer([TESLEM], extra=["Tesh"])
     assert "Andala" in terms and "Ubbi" in terms
+
+
+# --- gender from the courtesy form -----------------------------------------
+# Spanish courtesy forms agree in gender with the person named, so "la señora Muñoz"
+# rules out every male Muñoz. Evidence is pooled per speech: one honorific settles the
+# bare occurrences too, which is the whole point (a speech says "señora Muñoz" once and
+# "Muñoz" thirty times).
+
+MUNOZ_F = FakeDeputy("m1", "Muñoz de la Iglesia, Ester", "Mujer")
+MUNOZ_M = FakeDeputy("m2", "Muñoz Abrines, Pedro", "Hombre")
+MUNOZ_INDEX = build_deputy_index([MUNOZ_F, MUNOZ_M])
+
+
+@pytest.mark.parametrize("span, expected", [
+    ("la señora Muñoz", "Mujer"),
+    ("Señora Muñoz", "Mujer"),
+    ("doña Ester", "Mujer"),
+    ("Sra. Muñoz", "Mujer"),
+    ("el señor Muñoz", "Hombre"),
+    ("Señor Muñoz", "Hombre"),
+    ("don Pedro", "Hombre"),
+    ("Sr. Muñoz", "Hombre"),
+    # no courtesy form at all
+    ("Muñoz", None),
+    ("Ester Muñoz de la Iglesia", None),
+    # self-contradictory: assume nothing
+    ("el señor y la señora Muñoz", None),
+])
+def test_span_gender(span, expected):
+    assert span_gender(span) == expected
+
+
+def test_feminine_courtesy_form_picks_the_female_holder():
+    mentions = resolve_mentions(["la señora Muñoz"], MUNOZ_INDEX, 90)
+    assert _names(mentions) == {"Muñoz de la Iglesia, Ester"}
+
+
+def test_masculine_courtesy_form_picks_the_male_holder():
+    mentions = resolve_mentions(["el señor Muñoz"], MUNOZ_INDEX, 90)
+    assert _names(mentions) == {"Muñoz Abrines, Pedro"}
+
+
+def test_bare_shared_surname_with_no_courtesy_form_still_drops():
+    # The guard's default: nothing in the text says which Muñoz, so neither is claimed.
+    assert resolve_mentions(["Muñoz"], MUNOZ_INDEX, 90) == []
+
+
+def test_one_courtesy_form_settles_the_bare_occurrences_in_the_same_speech():
+    # The reason the cue is pooled per speech rather than read per span: the honorific
+    # appears once, the bare surname many times, and they are the same person.
+    mentions = resolve_mentions(
+        ["la señora Muñoz", "Muñoz", "Muñoz", "Muñoz"], MUNOZ_INDEX, 90)
+    assert _names(mentions) == {"Muñoz de la Iglesia, Ester"}
+    assert mentions[0].count == 4
+    assert mentions[0].surface_forms == ["Muñoz", "la señora Muñoz"]
+
+
+def test_contradicting_courtesy_forms_in_one_speech_drop_the_surname():
+    # Both Muñoz are named, so the surname identifies neither.
+    assert resolve_mentions(
+        ["la señora Muñoz", "el señor Muñoz", "Muñoz"], MUNOZ_INDEX, 90) == []
+
+
+def test_unknown_catalog_gender_never_rules_anybody_out():
+    # Most bootstrapped speakers have no gender; treating that as a mismatch would break
+    # resolutions that work today.
+    index = build_deputy_index([FakeDeputy("u1", "Muñoz de la Iglesia, Ester"),
+                                FakeDeputy("u2", "Muñoz Abrines, Pedro")])
+    assert resolve_mentions(["la señora Muñoz"], index, 90) == []
+
+
+def test_gender_does_not_promote_a_bare_given_name():
+    # The surname gate. "Alberto" ties every Alberto and names none of them; a courtesy
+    # form says nothing about WHICH. Measured on the gold set as a real false positive.
+    albertos = build_deputy_index([
+        FakeDeputy("a1", "Fabra Part, Alberto", "Hombre"),
+        FakeDeputy("a2", "Catalán Higueras, Alberto", "Hombre"),
+    ])
+    assert resolve_mentions(["el señor Alberto", "Alberto"], albertos, 90) == []
+
+
+def test_gender_still_drops_a_surname_shared_by_two_of_the_same_gender():
+    two_women = build_deputy_index([
+        FakeDeputy("w1", "Vázquez Blanco, Ana Belén", "Mujer"),
+        FakeDeputy("w2", "Vázquez Jiménez, María del Mar", "Mujer"),
+    ])
+    assert resolve_mentions(["la señora Vázquez"], two_women, 90) == []
+
+
+def test_courtesy_form_outranks_the_deputy_preference():
+    # The M65 regression: "la señora Rego, ministra de Juventud" is the minister Sira
+    # Rego, but the deputy preference handed the tie to the MALE deputy Néstor Rego.
+    deputy = FakeDeputy("rego-candamil-nestor", "Rego Candamil, Néstor", "Hombre")
+    minister = make_person_entry(
+        "sira-rego", "minister", "Rego, Sira Abed", gender="Mujer")
+    index = build_person_index([deputy], [minister])
+
+    feminine = resolve_mentions(["la señora Rego"], index, 90)
+    assert _names(feminine) == {"Rego, Sira Abed"}
+    # and the masculine form still reaches the deputy
+    masculine = resolve_mentions(["el señor Rego"], index, 90)
+    assert _names(masculine) == {"Rego Candamil, Néstor"}
+    # with no courtesy form the deputy preference is untouched
+    assert _names(resolve_mentions(["Rego"], index, 90)) == {"Rego Candamil, Néstor"}
+
+
+def test_gender_gate_can_be_switched_off():
+    assert resolve_mentions(
+        ["la señora Muñoz"], MUNOZ_INDEX, 90, gender_gate=False) == []
+
+
+def test_gender_never_overrides_an_unambiguous_full_name():
+    # A resolution that never needed the guard must not be second-guessed by a stray cue.
+    mentions = resolve_mentions(["doña Pedro Sánchez Pérez-Castejón"], INDEX, 90)
+    assert _names(mentions) == {"Sánchez Pérez-Castejón, Pedro"}
+
+
+def test_an_all_conflicting_tie_is_left_to_the_ambiguity_guard():
+    # If the cue contradicts every candidate the data is wrong somewhere; keep dropping
+    # rather than inventing a winner.
+    men = build_deputy_index([FakeDeputy("g1", "García López, Juan", "Hombre"),
+                              FakeDeputy("g2", "García Ruiz, Luis", "Hombre")])
+    assert resolve_mentions(["la señora García"], men, 90) == []
+
+
+# --- the query path is unaffected ------------------------------------------
+# resolve_person/match_person take no cue: a searcher types a bare name, so gender must
+# not change what a query resolves to.
+
+def test_query_resolution_is_unchanged_by_gender():
+    assert resolve_person("Muñoz", MUNOZ_INDEX, 90) is None
+    assert match_person("Muñoz", MUNOZ_INDEX, 90).candidates == [
+        "Muñoz de la Iglesia, Ester", "Muñoz Abrines, Pedro"]
+
+
+def test_a_courtesy_form_in_a_query_is_stripped_not_used():
+    # Honorifics are normalized away on the query side, exactly as before.
+    assert resolve_person("la señora Muñoz", MUNOZ_INDEX, 90) is None
