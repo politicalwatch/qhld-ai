@@ -4,6 +4,7 @@ The model is a main dependency (mention NER runs in the daily extract), so this
 runs by default; guarded by find_spec so a stripped env skips instead of erroring.
 """
 
+import re
 from importlib.util import find_spec
 
 import pytest
@@ -199,3 +200,34 @@ def test_a_role_word_is_not_absorbed():
     # span means, not merely how polite it is.
     spans = _ner().person_spans("El ministro Bolaños respondió.")
     assert not any("ministro" in s for s in spans)
+
+
+def test_a_leading_article_the_model_swallowed_is_trimmed():
+    # Sentence-initial, where the model tends to take "El" into the entity because it
+    # cannot tell a sentence capital from a name capital. The span still starts at the
+    # courtesy word, so both casings agree.
+    spans = _ner().person_spans("El señor Abascal intervino. Coincido con el señor Abascal.")
+    assert [s for s in spans if "Abascal" in s] == ["señor Abascal", "señor Abascal"]
+
+
+def test_no_span_begins_with_an_article():
+    text = ("El señor Abascal y la señora Montero discutieron. "
+            "La señora Montero respondió al señor Abascal.")
+    for span in _ner().person_spans(text):
+        assert not re.match(r"(?i)(el|la|los|las)\s", span), span
+
+
+def test_a_contracted_article_is_trimmed_too():
+    # "al" (a+el) and "del" (de+el) are as common before a courtesy form as the bare
+    # article, and are equally not part of the name.
+    spans = _ner().person_spans(
+        "Se lo dije al señor Bolaños y también hablé del señor Bolaños con ella.")
+    assert [s for s in spans if "Bolaños" in s] == ["señor Bolaños", "señor Bolaños"]
+
+
+def test_an_article_that_belongs_to_the_name_is_kept():
+    # The trim only fires when a courtesy word follows, so names whose article IS part of
+    # them are untouched — the corpus really contains 'La Razón', 'El Tito Berni'.
+    ner = _ner(gazetteer=["Berni"])
+    for span in ner.person_spans("Lo publicó La Razón sobre el caso El Tito Berni."):
+        assert "Razón" not in span or span.startswith("La")

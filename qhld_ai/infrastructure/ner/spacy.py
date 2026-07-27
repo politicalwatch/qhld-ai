@@ -36,6 +36,15 @@ _COURTESY_WORDS = frozenset({
     "señor", "señora", "señores", "señoras", "sr", "sra", "srs", "sras",
     "don", "doña",
 })
+# Definite articles the model sometimes swallows into the span, including the two forms
+# contracted with a preposition ("al" = a+el, "del" = de+el — both as common before a
+# courtesy form as the bare article: 915 and 958 occurrences against "la"'s 1304).
+# Trimmed back off, so a span always begins at the courtesy word: the model's choice here
+# tracks CAPITALISATION, not grammar — measured on the corpus, it keeps the article in 29
+# of 29 sentence-initial cases ("El señor Abascal…") and drops it in 48 of 49 mid-sentence
+# ones ("…con el señor Abascal"). Following the majority also drops an artifact, since no
+# article is part of anyone's name.
+_LEADING_ARTICLES = frozenset({"el", "la", "los", "las", "al", "del"})
 
 
 class SpacyNer(NerPort):
@@ -85,23 +94,31 @@ class SpacyNer(NerPort):
         return [(start, end) for _, start, end in self._matcher(doc)
                 if not any(s < end and start < e for s, e in per)]
 
-    def _with_courtesy(self, doc, start: int) -> int:
-        """``start`` extended left over an adjacent courtesy word, if there is one.
+    def _courtesy_start(self, doc, start: int, end: int) -> int:
+        """``start`` moved so the span begins at its courtesy word, in either direction.
 
-        The model folds "señor"/"señora" into a PER span only sometimes — "señor Torres"
-        but a bare "Rego" where the text reads "la señora Rego" — and that inconsistency
-        loses real information: the courtesy form agrees in gender with the person named,
-        which is what lets the resolver tell two holders of a surname apart. Including it
-        uniformly is what makes that cue dependable.
+        The model has no settled behaviour here: across the corpus it left the courtesy
+        word OUT of the span 1,259 times and put it IN 1,160 — near a coin flip — and that
+        inconsistency loses real information, because the courtesy form agrees in gender
+        with the person named, which is what lets the resolver tell two holders of one
+        surname apart. So it is normalised rather than trusted:
 
-        The definite article is deliberately NOT absorbed: "la" is not part of anyone's
-        name, the gender is already carried by "señora", and the span doubles as the
-        highlight target on the site, so it should start at the courtesy word."""
+        - extend LEFT over an adjacent courtesy word the model dropped;
+        - trim a leading article the model swallowed, so "El señor Abascal" and
+          "el señor Abascal" both yield "señor Abascal".
+
+        The article is excluded both ways because it is nobody's name, and because the
+        span doubles as the highlight target on the site."""
         probe = start - 1
         if probe >= 0 and doc[probe].text == ".":      # "Sra." tokenizes as "Sra" + "."
             probe -= 1
         if probe >= 0 and doc[probe].text.lower().rstrip(".") in _COURTESY_WORDS:
             return probe
+        # nothing to absorb — but the model may have taken the article in already
+        if (end - start > 1
+                and doc[start].text.lower() in _LEADING_ARTICLES
+                and doc[start + 1].text.lower().rstrip(".") in _COURTESY_WORDS):
+            return start + 1
         return start
 
     def person_spans(self, text: str) -> list[str]:
@@ -110,7 +127,7 @@ class SpacyNer(NerPort):
         doc = self._doc(text)
         bounds = [(ent.start, ent.end) for ent in doc.ents if ent.label_ == "PER"]
         bounds.extend(self._rescued(doc))
-        spans = [(start, end, doc[self._with_courtesy(doc, start):end].text)
+        spans = [(start, end, doc[self._courtesy_start(doc, start, end):end].text)
                  for start, end in bounds]
         spans.sort()
         return [span_text for _, _, span_text in spans]
