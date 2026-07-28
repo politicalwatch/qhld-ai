@@ -163,19 +163,25 @@ _CONTEXT_CUE_PATTERNS = (
     # NB: no "expresidente(a) del Gobierno <Apellido>" cue — its only job was to keep
     # an ex-PM (Aznar, Zapatero) from resolving to a colliding deputy; the ex-PMs now
     # live in the person catalog and resolve there instead of being dropped.
+    # NB: no dictatorship cue either — it used to drop "Franco" in speeches invoking the
+    # dictatorship, which only ever deleted the wrong answer. Measured over the corpus it
+    # was also leaky in both directions: it fired in 38 speeches, yet in none of the 30
+    # that credited the deputy surnamed Franco with a mention — 29 of which were plainly
+    # the dictator ("exhumar a Franco", "con Franco vivíamos mejor"). He is now a catalog
+    # person who WINS the surname outright, so the reference resolves instead of vanishing.
 )
-# Franco is uniquely the dictator whenever the speech invokes the dictatorship; the
-# deputy surnamed Franco is meant only absent that framing (hence a cue, not a denylist).
-_DICTATORSHIP_CUE = re.compile(r"dictadur|dictador|franquism|r[ée]gimen\s+de\s+franco")
 
 
 def context_excluded_surnames(text: str) -> frozenset[str]:
-    """Surnames the speech's own wording marks as non-deputies (a magistrate, judge,
-    prosecutor, former head of government, or Franco-the-dictator). Speech-scoped."""
+    """Surnames the speech's own wording marks as non-deputies (a magistrate, judge or
+    prosecutor). Speech-scoped.
+
+    Still worth keeping after the judiciary entered the catalog, because it is what
+    protects a deputy from an UNCURATED homonym on the bench; a curated judge needs no
+    protecting, since ``resolve_mentions`` applies the exclusion to deputy resolutions
+    only."""
     low = (text or "").lower()
     excluded = set()
-    if _DICTATORSHIP_CUE.search(low):
-        excluded.add("franco")
     for pattern in _CONTEXT_CUE_PATTERNS:
         for match in re.finditer(pattern, low):
             excluded.add(match.group(1))
@@ -227,10 +233,11 @@ def _gender_vetoes(cue: str | None, norm: str, entry: PersonEntry) -> bool:
 
     Narrowing (above) can only choose between candidates; when the catalog holds exactly
     ONE bearer of the surname it has nothing to choose from and hands back the person the
-    form contradicts. That is how "el señor Marcos" became the deputy Milagros Marcos, "la
-    señora Caballero" the deputy Francisco Sierra Caballero, and "el señor Franco" a
-    deputy rather than the dictator. Measured over the corpus, every such resolution names
-    somebody outside the catalog, so the honest answer is to name nobody.
+    form contradicts. That is how "el señor Marcos" became the deputy Milagros Marcos and
+    "la señora Caballero" the deputy Francisco Sierra Caballero. Measured over the corpus,
+    every such resolution names somebody outside the catalog, so the honest answer is to
+    name nobody — and where that somebody is worth naming, the answer is to curate them,
+    which is what removed the dictator Franco from this list.
 
     It fires only when the span identifies the person by SURNAME alone. A span carrying
     their given name has already identified them beyond doubt ("doña Pedro Sánchez

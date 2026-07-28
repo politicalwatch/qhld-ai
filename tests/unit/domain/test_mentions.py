@@ -180,13 +180,56 @@ def test_context_cue_magistrate():
     assert "macías" in context_excluded_surnames(text)
 
 
-def test_context_cue_dictatorship_flags_franco():
+def test_dictatorship_framing_no_longer_flags_a_surname():
+    """The dictatorship cue is gone: naming the dictator is now the catalog's job, not an
+    exclusion's. Dropping "Franco" only ever deleted the wrong answer, and it fired in
+    speeches that were not the ones misattributing him anyway."""
     text = "La ley debe ser la orgánica de Franco, la manera fina de llamarla en la Dictadura."
-    assert "franco" in context_excluded_surnames(text)
+    assert context_excluded_surnames(text) == frozenset()
+
+
+# A deputy who merely shares the dictator's surname, and the dictator himself as the
+# catalog holds him: a curated non-deputy who WINS the bare surname (``overrides_deputy``).
+SILVIA_FRANCO = FakeDeputy("d9", "Franco González, Silvia", gender="Mujer")
+DICTATOR = make_person_entry(
+    person_id="francisco-franco", person_type="historical",
+    name="Franco Bahamonde, Francisco", aliases=["Franco", "Francisco Franco"],
+    overrides_deputy=True, gender="Hombre")
+INDEX_FRANCO = build_person_index([SILVIA_FRANCO], [DICTATOR])
+
+
+def test_bare_surname_names_the_dictator_not_the_deputy():
+    """Measured over the corpus, 29 of the 30 speeches crediting the deputy Franco with a
+    mention were naming the dictator, so the bare surname belongs to him."""
+    assert _names(resolve_mentions(["Franco"], INDEX_FRANCO, 90)) == {
+        "Franco Bahamonde, Francisco"}
+
+
+def test_full_name_still_names_the_deputy():
+    """The override must not swallow the deputy's own full name. ``_prefer_overrides``
+    scores order-sensitively, so "doña Silvia Franco" stays with her — the same mechanism
+    that keeps "Gamarra Ruiz-Clavijo" off the Canarias president."""
+    assert _names(resolve_mentions(["doña Silvia Franco"], INDEX_FRANCO, 90)) == {
+        "Franco González, Silvia"}
 
 
 def test_no_context_cue_yields_empty():
     assert context_excluded_surnames("El señor Sánchez habló de vivienda.") == frozenset()
+
+
+def test_curated_figure_without_override_leaves_the_bare_surname_alone():
+    """Curating somebody who shares a deputy's surname is safe WITHOUT an override, and
+    this is why: ``_name_keys`` always derives the bare surname as a key, so the curated
+    person inevitably ties for it — and the deputy preference then keeps the deputy. That
+    is what lets Irene Montero, Dolores Delgado and Javier Cercas be curated under their
+    full names without taking a bare "Montero"/"Delgado"/"Cercas" from anybody."""
+    irene = make_person_entry(
+        person_id="irene-montero", person_type="former_minister",
+        name="Montero Gil, Irene", aliases=["Irene Montero"], gender="Mujer")
+    index = build_person_index([MONTERO], [irene])
+    assert _names(resolve_mentions(["Montero"], index, 90)) == {
+        "Montero Cuadrado, María Jesús"}
+    assert _names(resolve_mentions(["Irene Montero"], index, 90)) == {"Montero Gil, Irene"}
 
 
 # --- tie-break (recall) ----------------------------------------------------
