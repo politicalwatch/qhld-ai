@@ -289,6 +289,19 @@ def test_apposition_never_overrides_a_model_person_span():
     assert sum("Puente" in s for s in ner.person_spans(text)) == 1
 
 
+def test_apposition_yields_to_a_name_another_pass_already_claimed():
+    # The passes fire on the same name from different cues, and a name claimed twice is
+    # COUNTED twice. This stayed invisible while no office holder's surname was
+    # distinctive enough to be a gazetteer term, and appeared the day a curated office
+    # made "Feijóo" both.
+    text = "No sé si mañana el ministro Cuerpo hará alguna rectificación."
+    ner = _ner(office_surfaces=_OFFICES)
+    doc = ner._doc(text)
+    claimed = ner._appositions(doc)
+    assert claimed, "the pass must have something to yield here"
+    assert ner._appositions(doc, claimed) == []
+
+
 def test_a_leading_role_word_is_trimmed_from_the_model_span():
     # The model does fold the role word in ("ministro Torres"); the span keeps the name,
     # for the same reason the article is trimmed.

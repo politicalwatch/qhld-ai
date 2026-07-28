@@ -140,7 +140,7 @@ class SpacyNer(NerPort):
                    for token in name.lower().replace("-", " ").split()
                    if len(token) >= 3)
 
-    def _appositions(self, doc) -> list[tuple[int, int]]:
+    def _appositions(self, doc, claimed=()) -> list[tuple[int, int]]:
         """Names the text states an office for but the model did not tag as people: "El
         ministro Albares" comes back as MISC, "Cuerpo" as ORG, "El señor Sánchez" as MISC.
         They are person spans, so ``person_spans`` adds them and ``entity_spans`` excludes
@@ -155,10 +155,11 @@ class SpacyNer(NerPort):
         where the gazetteer must not be."""
         if not self._office_surfaces:
             return []
-        per = [(ent.start_char, ent.end_char) for ent in doc.ents if ent.label_ == "PER"]
+        taken = [(ent.start_char, ent.end_char) for ent in doc.ents if ent.label_ == "PER"]
+        taken.extend((doc[s].idx, doc[e - 1].idx + len(doc[e - 1])) for s, e in claimed)
         bounds: list[tuple[int, int]] = []
         for start, end, name, family in role_appositions(doc.text):
-            if any(s < end and start < e for s, e in per):
+            if any(s < end and start < e for s, e in taken):
                 continue
             if not self._holds_office(name, family):
                 continue
@@ -236,14 +237,15 @@ class SpacyNer(NerPort):
     def _claimed(self, doc) -> list[tuple[int, int]]:
         """Every span the post-passes take for the person side.
 
-        The courtesy pass is given what the other two claimed, because it is the one that
-        would otherwise duplicate them: it fires on the same names from a different cue,
-        and "la señora Vallugera" is one mention whether the gazetteer or the courtesy word
-        found it, not two. The gazetteer and apposition passes cannot collide with each
-        other by construction — the gazetteer only patterns out-of-vocabulary surnames and
-        every office holder's is in vocabulary — and measured over 400 speeches they never
-        did."""
-        claimed = self._rescued(doc) + self._appositions(doc)
+        Each pass is given what the earlier ones claimed, because they fire on the same
+        names from different cues and a name claimed twice is COUNTED twice: "la señora
+        Vallugera" is one mention whether the gazetteer or the courtesy word found it. The
+        gazetteer and the apposition pass looked disjoint for as long as no office holder's
+        surname was distinctive enough to be a gazetteer term ("Sánchez", "Cuerpo" and
+        "Torres" are all in vocabulary) — and then a curated office made "Feijóo" both, and
+        the gold caught his mentions doubling."""
+        rescued = self._rescued(doc)
+        claimed = rescued + self._appositions(doc, rescued)
         return claimed + self._courtesies(doc, claimed)
 
     def _role_start(self, doc, start: int, end: int) -> int:
