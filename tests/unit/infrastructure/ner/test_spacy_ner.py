@@ -311,3 +311,64 @@ def test_entity_spans_excludes_an_apposed_name():
 def test_no_office_map_leaves_the_adapter_as_it_was():
     text = "No sé si mañana el ministro Cuerpo hará alguna rectificación."
     assert _ner().person_spans(text) == _ner(office_surfaces={}).person_spans(text)
+
+
+# --- courtesy forms: the names the model drops -------------------------------
+# "señor Cuerpo" is how one speech addresses the finance minister fourteen times, and the
+# model calls it an ORG every time. The courtesy word is the evidence, so this pass needs
+# no catalog gate — whoever follows it is a person, catalogued or not.
+
+def _off():
+    from qhld_ai.infrastructure.config.settings import Settings
+    from qhld_ai.infrastructure.ner.factory import create_ner_from_env
+
+    return create_ner_from_env(Settings(ner_courtesy_form=False))
+
+
+def test_courtesy_form_tags_a_name_the_model_mislabels():
+    text = "Entro en materia, señor Cuerpo. Hace unos días lo advirtió el Eurogrupo."
+    assert not any("Cuerpo" in s for s in _off().person_spans(text))
+    # the courtesy word comes along, as in every other span: it carries the gender cue
+    assert "señor Cuerpo" in _ner().person_spans(text)
+
+
+def test_courtesy_form_does_not_read_across_a_sentence():
+    # "señor." ends a sentence; what follows is a verb, not a name. Only the abbreviated
+    # forms may be read across a full stop, because there it belongs to the word.
+    text = "Aquí no entra cualquier cosa. No, señor. Están los puestos de inspección."
+    assert _ner().person_spans(text) == _off().person_spans(text)
+    assert any("Vallugera" in s for s in _ner(gazetteer=[]).person_spans(
+        "Lo dijo la Sra. Vallugera en su intervención."))
+
+
+def test_courtesy_form_never_doubles_a_name_already_tagged():
+    # The model tags this one itself and the gazetteer would rescue it otherwise; either
+    # way "la señora Vallugera" is one mention, not two overlapping spans.
+    text = "Ha intervenido la señora Vallugera y después habló Pedro Sánchez."
+    ner = _ner(gazetteer=["Vallugera"])
+    assert sum("Vallugera" in s for s in ner.person_spans(text)) == 1
+    assert sum("Sánchez" in s for s in ner.person_spans(text)) == 1
+
+
+def test_courtesy_form_keeps_a_surname_written_with_particles():
+    # "señora Álvarez" alone is three deputies and gets dropped as ambiguous; the particle
+    # is what makes it one person.
+    spans = _ner().person_spans("Estoy deseando, señora Álvarez de Toledo, que hablemos.")
+    assert "señora Álvarez de Toledo" in spans
+
+
+def test_courtesy_form_does_not_join_two_people():
+    # "y" is not a name particle: these are two spans, whoever the model tags itself.
+    for span in _ner().person_spans(
+            "Discutieron el señor Feijóo y la señora Ayuso sobre la financiación."):
+        assert not ("Feijóo" in span and "Ayuso" in span)
+
+
+def test_entity_spans_excludes_a_courtesy_named_surname():
+    # The whole point of the pass on the entity side: the bare surname stops being a
+    # named entity, which is what kept "cuerpo" in the theme filter.
+    text = "Entro en materia, señor Cuerpo. España participa en Eurovisión este año."
+    assert any("Cuerpo" in s for s in _off().entity_spans(text))
+    entities = _ner().entity_spans(text)
+    assert not any("Cuerpo" in s for s in entities)
+    assert any("Eurovisión" in s for s in entities)

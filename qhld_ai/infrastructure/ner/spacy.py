@@ -14,13 +14,15 @@ costs a single parse.
 We run NER only over the Spanish text block upstream, so a single Spanish model
 covers monolingual and co-official speeches alike.
 
-Two post-passes add the people the model misses, both leaving its own PER spans
-untouched and both excluded from ``entity_spans``: the gazetteer below, and role
+Three post-passes add the people the model misses, all leaving its own PER spans
+untouched and all excluded from ``entity_spans``: the gazetteer below; role
 apposition (``_appositions``), which claims a name the text states an office for —
-"El ministro Albares", which the model returns as MISC. They are complementary by
-construction: the gazetteer covers surnames distinctive enough to tag anywhere but
-only if they are out of vocabulary, while apposition covers any surname, however
-common, where the role word makes that occurrence unambiguous.
+"El ministro Albares", which the model returns as MISC; and courtesy forms
+(``_courtesies``), which claim the name a speech addresses politely — "señor
+Cuerpo", returned as an ORG. They are complementary by construction: the gazetteer
+covers surnames distinctive enough to tag anywhere but only if they are out of
+vocabulary, while the other two cover any surname, however common, because the word
+before it says that occurrence names a person.
 
 The optional gazetteer (distinctive deputy surnames) is applied as a
 ``PhraseMatcher`` post-pass over the parsed doc, NOT as an entity-ruler pipe: a
@@ -45,6 +47,21 @@ _COURTESY_WORDS = frozenset({
     "señor", "señora", "señores", "señoras", "sr", "sra", "srs", "sras",
     "don", "doña",
 })
+# The courtesy forms written as an abbreviation, where the full stop belongs to the word
+# rather than to the sentence — the only ones a name may be read ACROSS. "La Sra.
+# Vallugera" names somebody; "a todo el mundo escucho decir que aquí entra cualquier cosa.
+# No, señor. Están los puestos de inspección" does not, and the two differ by nothing else.
+_COURTESY_ABBREVIATIONS = frozenset({"sr", "sra", "srs", "sras"})
+# How much name a courtesy form may introduce: at most three tokens ("señor Rodríguez
+# Zapatero"), each capitalised and long enough to discriminate — the same shape as the
+# names the apposition patterns capture (``domain.mentions._NAMED``).
+_MAX_NAME_TOKENS = 3
+_MIN_NAME_LEN = 3
+# Lowercase particles a surname may carry, crossed only when another capitalised token
+# follows: "señora Álvarez de Toledo" is one deputy, while a bare "señora Álvarez" is three
+# of them and gets dropped as ambiguous. "y"/"e" are deliberately absent — "el señor Feijóo
+# y la señora Ayuso" are two people and must not become one span.
+_NAME_PARTICLES = frozenset({"de", "del", "la", "las", "los", "da"})
 # Definite articles the model sometimes swallows into the span, including the two forms
 # contracted with a preposition ("al" = a+el, "del" = de+el — both as common before a
 # courtesy form as the bare article: 915 and 958 occurrences against "la"'s 1304).
@@ -151,6 +168,84 @@ class SpacyNer(NerPort):
                 bounds.append((span.start, span.end))
         return bounds
 
+    @staticmethod
+    def _name_token(token) -> bool:
+        """Whether ``token`` can be part of a name: capitalised, long enough to
+        discriminate, and made of letters — a hyphen or an apostrophe apart, which real
+        surnames carry ("Grande-Marlaska", "O'Donnell")."""
+        text = token.text
+        return (len(text) >= _MIN_NAME_LEN and text[0].isupper()
+                and all(char.isalpha() or char in "-'’" for char in text))
+
+    def _name_after(self, doc, start: int) -> int:
+        """Where the name beginning at ``start`` ends, or ``start`` when none does."""
+        end = start
+        while end < len(doc) and end - start < _MAX_NAME_TOKENS:
+            if self._name_token(doc[end]):
+                end += 1
+            elif (doc[end].text.lower() in _NAME_PARTICLES and end > start
+                  and end + 1 < len(doc) and self._name_token(doc[end + 1])):
+                end += 2
+            else:
+                break
+        return end
+
+    def _courtesies(self, doc, claimed) -> list[tuple[int, int]]:
+        """Names introduced by a courtesy form that nothing else tagged: "señor Cuerpo",
+        which one speech uses fourteen times for the finance minister and the model returns
+        as an ORG every time. Person spans like the two passes above, with the same overlap
+        rule — a model PER span always wins — and likewise excluded from ``entity_spans``.
+
+        A courtesy form is the same kind of local evidence a role word is, and a far
+        commoner one: whatever follows it is a person, whoever that person turns out to be.
+        Unlike ``_appositions`` this pass therefore takes no catalog gate. The office gate
+        exists there because a role word also appears where it names nobody — in vocatives
+        ("Gracias, presidenta") and in office complements — whereas a courtesy form is
+        followed by a name essentially always. Measured over 400 speeches: 194 names
+        claimed, of which the only ones naming nobody were two "don Quijote"; people from
+        outside the catalog (Alfonso Rueda apart, a documented false positive) are inert
+        rather than dangerous, because their surname reaches no catalog entry's threshold —
+        "señor Carlos Moreno" scores 75, "señor Koldo García" 78, "señor Casado" 57.
+
+        What must be exact is where the name STARTS: only an abbreviated courtesy form may
+        be read across a full stop, or "No, señor. Están los puestos…" claims a verb.
+        Returned bounds cover the name alone; ``_courtesy_start`` then extends the span
+        back over the courtesy word, so these spans carry the gender cue and highlight the
+        same surface as every other one, without this pass knowing about either."""
+        if not getattr(self.settings, "ner_courtesy_form", True):
+            return []
+        taken = [(ent.start, ent.end) for ent in doc.ents if ent.label_ == "PER"]
+        taken.extend(claimed)
+        bounds: list[tuple[int, int]] = []
+        for token in doc:
+            word = token.text.lower().rstrip(".")
+            if word not in _COURTESY_WORDS:
+                continue
+            start = token.i + 1
+            if (word in _COURTESY_ABBREVIATIONS
+                    and start < len(doc) and doc[start].text == "."):
+                start += 1
+            end = self._name_after(doc, start)
+            if end == start:
+                continue
+            if any(s < end and start < e for s, e in taken):
+                continue
+            bounds.append((start, end))
+        return bounds
+
+    def _claimed(self, doc) -> list[tuple[int, int]]:
+        """Every span the post-passes take for the person side.
+
+        The courtesy pass is given what the other two claimed, because it is the one that
+        would otherwise duplicate them: it fires on the same names from a different cue,
+        and "la señora Vallugera" is one mention whether the gazetteer or the courtesy word
+        found it, not two. The gazetteer and apposition passes cannot collide with each
+        other by construction — the gazetteer only patterns out-of-vocabulary surnames and
+        every office holder's is in vocabulary — and measured over 400 speeches they never
+        did."""
+        claimed = self._rescued(doc) + self._appositions(doc)
+        return claimed + self._courtesies(doc, claimed)
+
     def _role_start(self, doc, start: int, end: int) -> int:
         """``start`` moved past a leading role word, so the span holds the name alone:
         "ministro Torres" → "Torres".
@@ -195,8 +290,7 @@ class SpacyNer(NerPort):
             return []
         doc = self._doc(text)
         bounds = [(ent.start, ent.end) for ent in doc.ents if ent.label_ == "PER"]
-        bounds.extend(self._rescued(doc))
-        bounds.extend(self._appositions(doc))
+        bounds.extend(self._claimed(doc))
         spans = [(start, end, doc[self._role_start(
                      doc, self._courtesy_start(doc, start, end), end):end].text)
                  for start, end in bounds]
@@ -207,11 +301,11 @@ class SpacyNer(NerPort):
         if not text:
             return []
         doc = self._doc(text)
-        # Both passes claim their spans for the person side, so neither can also be an
+        # The post-passes claim their spans for the person side, so none can also be an
         # entity: a surname the model mislabelled ("Cuerpo" as ORG, "El ministro Albares"
         # as MISC) is a person, and leaving it in the entity index is what put bare
         # surnames in the theme filter.
-        claimed = self._rescued(doc) + self._appositions(doc)
+        claimed = self._claimed(doc)
         gate = getattr(self.settings, "ner_entity_pos_gate", True)
         return [ent.text for ent in doc.ents
                 if ent.label_ != "PER"

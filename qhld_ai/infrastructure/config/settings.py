@@ -120,6 +120,12 @@ class Settings(BaseSettings):
     # leave alone, because the role word is what says this occurrence names a person; the
     # claimed span also stops being a named entity. Off => those mentions stay untagged.
     ner_role_apposition: bool = True
+    # Tag the name a courtesy form introduces when the model missed it ("señor Cuerpo"
+    # comes back as ORG). Needs no catalog gate, unlike the apposition above: a role word
+    # also appears where it names nobody ("Gracias, presidenta"), while a courtesy form is
+    # followed by a name essentially always, and a surname from outside the catalog simply
+    # resolves to nobody. Off => those mentions stay untagged.
+    ner_courtesy_form: bool = True
     mention_match_threshold: int = 90
     # Let a gendered courtesy form decide a surname two catalog people share: "la señora
     # Muñoz" is the female Muñoz, so the ambiguity guard need not drop it. Evidence is
