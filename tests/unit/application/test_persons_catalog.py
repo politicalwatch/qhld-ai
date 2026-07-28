@@ -84,7 +84,7 @@ def test_alias_index_skips_aliases_that_normalize_away():
 def test_aliases_reach_the_assembled_person_index():
     index = load_person_index(
         [FakeDeputy("andala-ubbi-teslem", "Andala Ubbi, Teslem")], 90,
-        curated=[], nondeputy_speakers=[], deputy_aliases=RECORDS)
+        curated=[], nondeputy_speakers=[], deputy_aliases=RECORDS, speaker_offices=[])
     assert resolve_person("Tesh Sidi", index, 90).person_id == "andala-ubbi-teslem"
 
 
@@ -153,9 +153,9 @@ PROMOTED = [
 ]
 
 
-def _index(speakers):
+def _index(speakers, offices=()):
     return load_person_index([], 90, curated=[], nondeputy_speakers=speakers,
-                             deputy_aliases=[])
+                             deputy_aliases=[], speaker_offices=list(offices))
 
 
 def test_a_person_id_never_appears_twice_in_the_index():
@@ -255,7 +255,7 @@ def test_curated_records_thread_their_gender():
     curated = [{"person_id": "x", "person_type": "former_pm", "name": "Aznar López, José",
                 "aliases": ["Aznar"], "gender": "Hombre"}]
     index = load_person_index([], 90, curated=curated, nondeputy_speakers=[],
-                              deputy_aliases=[])
+                              deputy_aliases=[], speaker_offices=[])
     assert index[0].gender == "Hombre"
 
 
@@ -264,3 +264,38 @@ def test_shipped_curated_catalog_declares_a_gender_for_everyone():
     # record added without it silently loses that. Only code can enforce it.
     for row in load_curated():
         assert row.get("gender") in ("Hombre", "Mujer"), row["person_id"]
+
+
+# --- offices, for the role-apposition cue ------------------------------------
+# Who holds which office comes from the roles the corpus records people SPEAKING under,
+# which is the only place it exists — the deputy record carries committee posts, not
+# government ones.
+
+PM = [{"speaker": "Sánchez Pérez-Castejón, Pedro", "role": "Presidente del Gobierno"}]
+
+
+def test_an_office_reaches_the_deputy_who_holds_it():
+    # The prime minister is a sitting deputy, so this is the tier the office has to reach
+    # — and the reason offices are stamped on the assembled index rather than per tier.
+    index = load_person_index(
+        [FakeDeputy("sanchez-perez-castejon-pedro", "Sánchez Pérez-Castejón, Pedro")], 90,
+        curated=[], nondeputy_speakers=[], deputy_aliases=[], speaker_offices=PM)
+    assert index[0].offices == ("presidente",)
+
+
+def test_a_bootstrapped_speaker_gets_their_own_office():
+    rows = [{"speaker": "Rodríguez García, Isabel",
+             "role": "Ministra de Vivienda y Agenda Urbana"}]
+    assert _index(rows, rows)[0].offices == ("ministro",)
+
+
+def test_offices_accumulate_over_a_persons_roles():
+    # One row per wording and per promotion, and both offices stay true of them.
+    entry = _index(PROMOTED, PROMOTED)[0]
+    assert entry.offices == ("ministro", "vicepresidente")
+
+
+def test_a_role_with_no_office_and_an_unknown_speaker_are_both_no_ops():
+    rows = [{"speaker": "Pérez Pérez, Ana", "role": "Compareciente"},
+            {"speaker": "Nadie Que Exista, Juan", "role": "Ministro de Todo"}]
+    assert [e.offices for e in _index(rows[:1], rows)] == [()]

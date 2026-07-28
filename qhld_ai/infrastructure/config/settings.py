@@ -125,6 +125,12 @@ class Settings(BaseSettings):
     # already name — it only stops their remaining occurrences going uncounted. Off =>
     # those occurrences are dropped.
     mention_speech_coreference: bool = True
+    # Let the office a speech names somebody by decide a surname two catalog people share:
+    # "el presidente Sánchez" is the prime minister, not a deputy who happens to be called
+    # Sánchez. Pooled per speech like the courtesy form, and it only ever narrows a tie —
+    # when no candidate holds the office, the guard decides as before. Off => a surname
+    # named by title is dropped like any other ambiguous one.
+    mention_role_apposition: bool = True
 
 
 @lru_cache

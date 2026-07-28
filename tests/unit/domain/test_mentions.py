@@ -2,8 +2,11 @@
 
 Feeds raw NER-style spans + a fake deputy catalog through the resolver and asserts
 the canonicalization, dedupe/count, honorific stripping, ambiguity guard, and the
-gendered-courtesy-form gate that lets a shared surname resolve after all.
+cues that let a shared surname resolve after all — the gendered courtesy form, the
+office a role apposition names, and same-speech coreference.
 """
+
+from dataclasses import replace
 
 import pytest
 
@@ -16,8 +19,10 @@ from qhld_ai.domain.mentions import (
     make_person_entry,
     match_person,
     normalize_span,
+    office_families,
     resolve_mentions,
     resolve_person,
+    role_cues,
     span_gender,
 )
 
@@ -675,3 +680,155 @@ def test_coreference_does_not_chain_through_its_own_attachments():
     assert _counts(resolve_mentions(spans, MUNOZ_INDEX, 90, gender_gate=False)) == \
         _counts(resolve_mentions(list(reversed(spans)), MUNOZ_INDEX, 90,
                                  gender_gate=False))
+
+
+# --- role apposition -------------------------------------------------------
+# The office a speech names somebody by ("el presidente Sánchez") decides a surname the
+# guard drops, including the case gender cannot touch: several men called Sánchez, only
+# one of them the prime minister. The cue is read off the TEXT, since the role word is
+# outside the span the NER returns.
+
+def _offices(index, name, *families):
+    """The office stamp ``attach_offices`` applies at catalog-assembly time."""
+    return [replace(entry, offices=families) if entry.name == name else entry
+            for entry in index]
+
+
+SANCHEZ_SERNA = FakeDeputy("s2", "Sánchez Serna, Javier", "Hombre")
+SANCHEZ_INDEX = _offices(
+    build_deputy_index([FakeDeputy("s1", "Sánchez Pérez-Castejón, Pedro", "Hombre"),
+                        SANCHEZ_SERNA]),
+    "Sánchez Pérez-Castejón, Pedro", "presidente")
+
+
+@pytest.mark.parametrize("text, expected", [
+    # the tight apposition, with and without the article/courtesy form
+    ("Lo dijo el presidente Sánchez.", {"sánchez": "presidente"}),
+    ("Lo dijo presidente Sánchez.", {"sánchez": "presidente"}),
+    ("Lo dijo el señor ministro Sánchez.", {"sánchez": "ministro"}),
+    ("Lo dijo el vicepresidente Sánchez.", {"sánchez": "vicepresidente"}),
+    # postposed, which is why the span is not the place to read this
+    ("Se lo otorga al señor Sánchez, presidente del Gobierno.",
+     {"sánchez": "presidente"}),
+    # comma apposition: allowed because the office complement is there
+    ("Habló la ministra de Vivienda y Agenda Urbana, la señora Sánchez.",
+     {"sánchez": "ministro"}),
+    # the vocative to the chair, which is the commonest role word in the corpus and
+    # names nobody: the comma keeps it out
+    ("Señor presidente, la señora Sánchez ha dicho…", {}),
+    ("Muchas gracias, señora presidenta. Sánchez lo sabe.", {}),
+    # a role reference that names nobody at all
+    ("El presidente del Gobierno compareció ayer.", {}),
+    # two offices on one surface: it names two people, so assume nothing
+    ("El presidente Sánchez y la ministra Sánchez.", {}),
+])
+def test_role_cues(text, expected):
+    assert role_cues(text, ["Sánchez", "la señora Sánchez"]) == expected
+
+
+def test_a_capture_that_the_speech_never_spans_is_not_a_cue():
+    # The gate that makes the loose tail harmless: "Gracias", "Señorías" and every
+    # office complement get captured and then thrown away for naming no span.
+    assert role_cues("Gracias, presidente Sánchez.", ["Montero"]) == {}
+
+
+def test_role_apposition_picks_the_office_holder_out_of_a_tie():
+    # Both are men, so gender says nothing and the guard drops the surname today.
+    spans = ["Sánchez"]
+    assert resolve_mentions(spans, SANCHEZ_INDEX, 90) == []
+    mentions = resolve_mentions(spans, SANCHEZ_INDEX, 90,
+                                text="Eso lo dijo el presidente Sánchez.")
+    assert _names(mentions) == {"Sánchez Pérez-Castejón, Pedro"}
+
+
+def test_one_role_apposition_settles_the_bare_occurrences_in_the_same_speech():
+    # Why the cue is pooled per surface: the title is used once, the bare surname many
+    # times, and within one speech they are the same person. This is the M65 class —
+    # 18 occurrences hanging off a single "el presidente Sánchez".
+    text = ("El presidente Sánchez lo anunció. Y el señor Sánchez insiste, "
+            "porque Sánchez sabe que Sánchez no puede.")
+    mentions = resolve_mentions(
+        ["Sánchez", "el señor Sánchez", "Sánchez", "Sánchez"], SANCHEZ_INDEX, 90,
+        text=text)
+    assert _counts(mentions) == {"Sánchez Pérez-Castejón, Pedro": 4}
+
+
+def test_role_apposition_outranks_the_deputy_preference():
+    # A minister is not a deputy, so the deputy preference hands the tie to the deputy
+    # who merely shares the surname. The office says otherwise.
+    deputy = FakeDeputy("t1", "Torres Tejada, María", "Mujer")
+    minister = make_person_entry("angel-victor-torres", "minister", "Torres Pérez, Ángel",
+                                 gender="Hombre", offices=("ministro",))
+    index = build_person_index([deputy], [minister])
+
+    named = resolve_mentions(["Torres"], index, 90,
+                             text="Lo firmó el ministro Torres.")
+    assert _names(named) == {"Torres Pérez, Ángel"}
+    # with no apposition the deputy preference is untouched
+    assert _names(resolve_mentions(["Torres"], index, 90)) == {"Torres Tejada, María"}
+
+
+def test_an_office_no_tied_person_holds_leaves_the_tie_alone():
+    # "la ministra Maroto" is an ex-minister the catalog does not carry: nobody tied here
+    # holds the office, so the role word is not evidence and the guard still drops it.
+    assert resolve_mentions(["Sánchez"], SANCHEZ_INDEX, 90,
+                            text="Lo dijo la ministra Sánchez.") == []
+
+
+def test_role_apposition_does_not_promote_a_bare_given_name():
+    # The surname gate again: "Pedro" ties both and names neither, whatever office the
+    # sentence attaches to it.
+    index = _offices(
+        build_deputy_index([FakeDeputy("p1", "Sánchez Pérez-Castejón, Pedro"),
+                            FakeDeputy("p2", "Casares Hontañón, Pedro")]),
+        "Sánchez Pérez-Castejón, Pedro", "presidente")
+    assert resolve_mentions(["Pedro"], index, 90,
+                            text="Lo dijo el presidente Pedro.") == []
+
+
+def test_role_apposition_never_overrides_an_unambiguous_name():
+    # A resolution that never needed the guard must not be second-guessed by a stray
+    # office: the deputy Sánchez Serna keeps his own occurrences.
+    mentions = resolve_mentions(
+        ["Sánchez Serna", "Sánchez"], SANCHEZ_INDEX, 90,
+        text="El señor Sánchez Serna replicó al presidente Sánchez.")
+    assert _counts(mentions) == {
+        "Sánchez Serna, Javier": 1, "Sánchez Pérez-Castejón, Pedro": 1}
+
+
+def test_role_apposition_is_inert_without_the_speech_text():
+    # The spans alone carry no role word, so a caller that passes none — the query path,
+    # and any caller predating this — gets exactly the old behaviour.
+    assert resolve_mentions(["Sánchez"], SANCHEZ_INDEX, 90) == []
+
+
+def test_role_apposition_can_be_switched_off():
+    assert resolve_mentions(["Sánchez"], SANCHEZ_INDEX, 90,
+                            text="Lo dijo el presidente Sánchez.",
+                            role_apposition=False) == []
+
+
+@pytest.mark.parametrize("role, expected", [
+    ("Presidente del Gobierno", {"presidente"}),
+    ("Presidenta del Congreso de los Diputados", {"presidente"}),
+    ("Ministra de Vivienda y Agenda Urbana", {"ministro"}),
+    # one person, two offices, both true of them
+    ("Vicepresidenta Primera del Gobierno y Ministra de Hacienda",
+     {"vicepresidente", "ministro"}),
+    # "vicepresidenta" must not feed the "presidente" family: different people
+    ("Vicepresidente Primero del Gobierno", {"vicepresidente"}),
+    # no office to read
+    ("Diputado", set()),
+    ("Compareciente", set()),
+    (None, set()),
+])
+def test_office_families(role, expected):
+    assert office_families(role) == expected
+
+
+def test_the_query_path_reads_no_office():
+    # A searcher types a bare name with no speech around it, so the cue cannot reach
+    # here: an ambiguous surname stays ambiguous.
+    assert resolve_person("Sánchez", SANCHEZ_INDEX, 90) is None
+    assert match_person("Sánchez", SANCHEZ_INDEX, 90).candidate_names == [
+        "Sánchez Pérez-Castejón, Pedro", "Sánchez Serna, Javier"]

@@ -19,10 +19,12 @@ a surname alone resolves but noise does not. Because bare surnames collide acros
 deputies ("García"), an **ambiguity guard** drops any span whose top score is
 shared by two or more deputies — favouring a missed mention over a wrong one.
 
-Two cues recover what that guard would otherwise throw away, and both read the
+Three cues recover what that guard would otherwise throw away, and all read the
 whole speech rather than one span: the gender a courtesy form implies ("la señora
-Muñoz" cannot be the male Muñoz) and, for what is still tied afterwards, the one
-tied person the speech names elsewhere in full.
+Muñoz" cannot be the male Muñoz), the office a role apposition names somebody by
+("el presidente Sánchez" is the prime minister, not a deputy who shares the
+surname) and, for what is still tied afterwards, the one tied person the speech
+names elsewhere in full.
 
 Kept pure (takes a prebuilt index, returns ``Mention`` objects) so it is unit-
 testable offline with no Mongo, mirroring ``domain.speeches.segmentation``.
@@ -56,6 +58,42 @@ _MIN_LEN = 3
 # are the person catalog's own ("Hombre"/"Mujer") so no translation layer is needed.
 _FEMININE_CUE = re.compile(r"\b(?:se[nñ]ora|se[nñ]oras|sra|sras|do[nñ]a)\b", re.I)
 _MASCULINE_CUE = re.compile(r"\b(?:se[nñ]or|se[nñ]ores|sr|srs|don)\b", re.I)
+
+
+# The offices a speech can name somebody by ("el presidente Sánchez"), mapped to the
+# family the catalog records them under. Both grammatical genders map to one family, and
+# tokens are matched WHOLE: "vicepresidenta" must not feed the "presidente" family, since
+# they are different people. Kept to the offices the corpus actually records for a
+# speaker, because an office nobody holds in the data can never be evidence.
+_ROLE_FAMILIES = {
+    "presidente": "presidente", "presidenta": "presidente",
+    "vicepresidente": "vicepresidente", "vicepresidenta": "vicepresidente",
+    "ministro": "ministro", "ministra": "ministro",
+}
+_ROLE_HEAD = "|".join(sorted(_ROLE_FAMILIES, key=len, reverse=True))
+# "Vicepresidenta Primera del Gobierno", "Ministro de Política Territorial y Memoria
+# Democrática" — the ordinal and the office complement that can stand between the role
+# word and the name. The complement is bounded to six words so it cannot run off into the
+# rest of the sentence, and its words may be comma-separated because real offices are
+# ("Ministro de Derechos Sociales, Consumo y Agenda 2030"); the comma that ends the
+# apposition is matched by the caller, so the longest complement is tried first.
+_ORDINAL = r"(?:\s+(?:primer[oa]|segund[oa]|tercer[oa]|cuart[oa]))?"
+_COMPLEMENT = r"(?:\s+(?:de|del|de\s+la|para|en)\s+[\w'’-]+(?:,?\s+[\w'’-]+){0,5})"
+# What may sit between the role word and the name without breaking the apposition: the
+# article and the courtesy form, and nothing else. No comma and no sentence boundary can
+# appear here, which is what keeps the vocative apart from an apposition — "señor
+# presidente, la señora Montero" addresses the chair and then names somebody else.
+_LINK = r"\s+(?:(?:el|la)\s+)?(?:se[nñ]or(?:a)?|don|do[nñ]a)?\s*"
+_NAMED = r"([A-ZÁÉÍÓÚÑ][\w'’-]{2,}(?:\s+[A-ZÁÉÍÓÚÑ][\w'’-]{2,}){0,2})"
+# "(el) presidente Sánchez", "el señor ministro Torres"
+_ROLE_BEFORE = re.compile(rf"\b({_ROLE_HEAD})\b{_ORDINAL}{_LINK}{_NAMED}")
+# "la ministra de Vivienda, Isabel Rodríguez" — a comma is allowed only when the role
+# word carries its office complement, which is what a vocative never does.
+_ROLE_APPOSED = re.compile(
+    rf"\b({_ROLE_HEAD})\b{_ORDINAL}{_COMPLEMENT},\s*"
+    r"(?:(?:el|la)\s+)?(?:se[nñ]or(?:a)?|don|do[nñ]a)?\s*" + _NAMED)
+# "el señor Sánchez, presidente del Gobierno"
+_ROLE_AFTER = re.compile(rf"{_NAMED}\s*[,\-–—]\s*(?:(?:el|la)\s+)?\b({_ROLE_HEAD})\b")
 
 
 def span_gender(span: str) -> str | None:
@@ -135,13 +173,19 @@ class PersonEntry:
 
     ``gender`` ("Hombre"/"Mujer", the catalog's own vocabulary) lets a gendered courtesy
     form in the span rule this person out: "la señora Muñoz" cannot be the male Muñoz.
-    ``None`` means unknown and never rules anybody out — see ``_gender_conflicts``."""
+    ``None`` means unknown and never rules anybody out — see ``_gender_conflicts``.
+
+    ``offices`` are the role families this person holds ("presidente", "ministro"), so a
+    speech that names somebody by their title — "el presidente Sánchez" — resolves to the
+    holder rather than being dropped as an ambiguous surname. Empty means no office is
+    recorded, which is the case for most people and never rules anybody out."""
     person_id: str
     person_type: str
     name: str
     keys: tuple[str, ...]
     overrides_deputy: bool = False
     gender: str | None = None
+    offices: tuple[str, ...] = ()
 
 
 def _gender_conflicts(cue: str | None, entry: PersonEntry) -> bool:
@@ -157,6 +201,27 @@ def _narrow_by_gender(cue: str | None, tied: list[PersonEntry]) -> list[PersonEn
     and let the ambiguity guard have the last word rather than inventing a winner."""
     kept = [e for e in tied if not _gender_conflicts(cue, e)]
     return kept if kept else tied
+
+
+def _narrow_by_office(cue: str, tied: list[PersonEntry]) -> list[PersonEntry]:
+    """Keep the tied people who HOLD the cued office, unless that would leave nothing.
+
+    Sharper than ``_narrow_by_gender``, which only removes candidates a courtesy form
+    contradicts: an office is a positive claim about one person, so the holders are the
+    only candidates left when any of them is a holder. When none is, the role word is not
+    evidence about anybody here — the person named may be outside the catalog ("la
+    ministra Maroto", who no longer sits) or their office simply unrecorded — so the tie
+    is handed back untouched and the guard decides as if no role word had been read."""
+    holders = [entry for entry in tied if cue in entry.offices]
+    return holders if holders else tied
+
+
+def office_families(role: str | None) -> frozenset[str]:
+    """The role families a speaker's official title claims — "Vicepresidenta Primera del
+    Gobierno y Ministra de Hacienda" holds both "vicepresidente" and "ministro". Read off
+    whole tokens, so a title says nothing about the families it merely contains."""
+    words = re.findall(r"[\w'’-]+", (role or "").lower())
+    return frozenset(_ROLE_FAMILIES[word] for word in words if word in _ROLE_FAMILIES)
 
 
 def _names_a_surname(norm: str, tied: list[PersonEntry]) -> bool:
@@ -183,7 +248,7 @@ def _name_keys(name: str) -> set[str]:
 
 
 def make_person_entry(person_id, person_type, name, aliases=(), overrides_deputy=False,
-                      gender=None):
+                      gender=None, offices=()):
     """Build a non-deputy ``PersonEntry``. Keys come from the canonical ``name`` plus
     any ``aliases`` (nicknames, bare surname, role phrases like "su majestad"), each
     run through ``normalize_span`` so they match under the same normalization the
@@ -195,7 +260,8 @@ def make_person_entry(person_id, person_type, name, aliases=(), overrides_deputy
             keys.add(norm)
     return PersonEntry(
         person_id=person_id, person_type=person_type, name=name,
-        keys=tuple(sorted(keys)), overrides_deputy=overrides_deputy, gender=gender)
+        keys=tuple(sorted(keys)), overrides_deputy=overrides_deputy, gender=gender,
+        offices=tuple(offices))
 
 
 def build_deputy_index(deputies, *, aliases=None) -> list[PersonEntry]:
@@ -374,11 +440,12 @@ def match_person(name: str, index: list[PersonEntry], threshold: int) -> PersonM
 
 
 def _match_one(norm: str, index: list[PersonEntry], threshold: int,
-               gender=None) -> PersonMatch:
+               gender=None, office=None) -> PersonMatch:
     """``gender`` is the courtesy form's gender read off the RAW span (see
-    ``span_gender``), which ``norm`` has already had stripped. It only ever removes
-    candidates the form contradicts, so passing ``None`` — as every query-side caller
-    does — leaves the outcome exactly as it was before gender existed."""
+    ``span_gender``), which ``norm`` has already had stripped. ``office`` is the role
+    family the speech appositions this surface with (see ``role_cues``). Both only ever
+    narrow an ambiguous tie, so passing ``None`` — as every query-side caller does —
+    leaves the outcome exactly as it was before either cue existed."""
     best_score = 0
     tied: list[PersonEntry] = []
     for entry in index:
@@ -389,12 +456,17 @@ def _match_one(norm: str, index: list[PersonEntry], threshold: int,
             tied.append(entry)
     if best_score < threshold:
         return PersonMatch(None, best_score, tied)
-    if len(tied) > 1 and gender and _names_a_surname(norm, tied):
-        # Before any preference rule: a gendered courtesy form is a hard fact about who is
-        # being named, so it outranks the deputy preference below. Without this, "la señora
+    if len(tied) > 1 and (gender or office) and _names_a_surname(norm, tied):
+        # Before any preference rule: what the text says about who is being named is a
+        # hard fact, so it outranks the deputy preference below. Without this, "la señora
         # Rego, ministra de Juventud" ties the minister Sira Rego with the deputy Néstor
-        # Rego and the deputy preference hands it to HIM.
-        tied = _narrow_by_gender(gender, tied)
+        # Rego and the deputy preference hands it to HIM; and "el presidente Sánchez" ties
+        # the prime minister with the deputies who share his surname, all of them men, so
+        # only the office tells them apart.
+        if gender:
+            tied = _narrow_by_gender(gender, tied)
+        if office and len(tied) > 1:
+            tied = _narrow_by_office(office, tied)
     if len(tied) > 1:
         # An override only applies when the span names the override's OWN first surname —
         # not when it merely shares a secondary token (the ex-PM "Aznar López" must not
@@ -479,6 +551,36 @@ def _gender_cues(spans) -> dict[str, str]:
     return {norm: next(iter(cues)) for norm, cues in seen.items() if len(cues) == 1}
 
 
+def role_cues(text: str, spans) -> dict[str, str]:
+    """Map each normalized surface to the office the speech names it by — "el presidente
+    Sánchez" says the Sánchez meant here is the one holding the presidency, which no
+    amount of fuzzy matching can tell.
+
+    Read off the TEXT rather than the spans, because the role word is outside the span:
+    the model does not include it, and extending the span over it would break both the
+    postposed form ("el señor Sánchez, presidente del Gobierno") and the surface the site
+    highlights. A capture is kept only when it names a surface the speech actually spans,
+    which is what makes the appositions that name no person ("el presidente del Gobierno
+    …", "señora presidenta. Gracias") inert instead of dangerous.
+
+    Pooled per surface over the whole speech for the same reason gender is (see
+    ``_gender_cues``): the title is used once and the bare surname many times. Surfaces
+    whose appositions disagree are dropped — two offices on one surname mean it names two
+    people, which is exactly when nothing should be assumed."""
+    surfaces = {normalize_span(span) for span in spans}
+    surfaces.discard("")
+    seen: dict[str, set[str]] = {}
+    for pattern, name_group, role_group in (
+            (_ROLE_BEFORE, 2, 1), (_ROLE_APPOSED, 2, 1), (_ROLE_AFTER, 1, 2)):
+        for match in pattern.finditer(text or ""):
+            family = _ROLE_FAMILIES.get(match.group(role_group).lower())
+            norm = normalize_span(match.group(name_group))
+            if family and norm in surfaces:
+                seen.setdefault(norm, set()).add(family)
+    return {norm: next(iter(families))
+            for norm, families in seen.items() if len(families) == 1}
+
+
 def _coreferents(matches: dict[str, PersonMatch], threshold: int) -> dict[str, PersonEntry]:
     """Map each still-ambiguous surface to the one tied person the speech names
     elsewhere — same-speech coreference.
@@ -514,7 +616,8 @@ def _coreferents(matches: dict[str, PersonMatch], threshold: int) -> dict[str, P
 def resolve_mentions(
     spans, index: list[PersonEntry], threshold: int,
     excluded_surnames: frozenset[str] = frozenset(), *,
-    gender_gate: bool = True, coreference: bool = True) -> list[Mention]:
+    gender_gate: bool = True, coreference: bool = True,
+    text: str | None = None, role_apposition: bool = True) -> list[Mention]:
     """Collapse raw NER ``spans`` (duplicates preserved) into canonical ``Mention``s.
 
     Each span is normalized then resolved (once per distinct normalized form).
@@ -524,19 +627,24 @@ def resolve_mentions(
     it never touches a resolved non-deputy. Returns mentions ordered by descending
     count then name.
 
-    Two signals need the whole speech rather than one span, which is why the spans are
+    Three signals need the whole speech rather than one span, which is why the spans are
     matched first and counted second. ``gender_gate`` lets a gendered courtesy form
     settle a surname the ambiguity guard would otherwise drop ("la señora Muñoz" is the
-    female Muñoz). ``coreference`` then attaches the surnames still tied to the one tied
-    person the speech names elsewhere (see ``_coreferents``). Coreference reads only the
-    first pass, so no attachment can become evidence for another and the result does not
-    depend on the order the spans arrive in."""
+    female Muñoz). ``role_apposition`` lets the office a speech names somebody by settle
+    one too ("el presidente Sánchez"); it is the only signal that needs the speech
+    ``text``, because the role word falls outside the span, and stays inert without it.
+    ``coreference`` then attaches the surnames still tied to the one tied person the
+    speech names elsewhere (see ``_coreferents``). Coreference reads only the first pass,
+    so no attachment can become evidence for another and the result does not depend on the
+    order the spans arrive in."""
     cues = _gender_cues(spans) if gender_gate else {}
+    offices = role_cues(text, spans) if role_apposition and text else {}
     matches: dict[str, PersonMatch] = {}
     for span in spans:
         norm = normalize_span(span)
         if norm and norm not in matches:
-            matches[norm] = _match_one(norm, index, threshold, gender=cues.get(norm))
+            matches[norm] = _match_one(norm, index, threshold, gender=cues.get(norm),
+                                       office=offices.get(norm))
     coreferents = _coreferents(matches, threshold) if coreference else {}
 
     by_person: dict[str, dict] = {}

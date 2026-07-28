@@ -179,9 +179,13 @@ class EntityResolver:
          self._group_categories) = _build_group_aliases(groups, curated_aliases)
         self._alias_index = alias_index(deputy_aliases)
         self._person_index = (
+            # No offices: they exist for the index-time role-apposition cue ("el
+            # presidente Sánchez"), which reads a speech's own wording. A query carries no
+            # such cue, so the aggregation behind them would be paid for nothing and the
+            # resolutions are identical without it.
             load_person_index(deputies, mention_threshold,
                               curated=curated, nondeputy_speakers=nondeputy_speakers,
-                              deputy_aliases=deputy_aliases)
+                              deputy_aliases=deputy_aliases, speaker_offices=[])
             if deputies else [])
         self._mention_threshold = mention_threshold
 

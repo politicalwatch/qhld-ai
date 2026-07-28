@@ -59,13 +59,15 @@ Non-deputies come from two sources:
   tier grows on its own as more sessions are imported.
 
 The matching itself (key building, fuzzy scoring) lives in the pure
-``domain.speeches.mentions``; this module only does the I/O and the role→type
-mapping, then hands a flat ``PersonEntry`` list to the resolver — mirroring how the
+``domain.speeches.mentions``; this module only does the I/O and the mapping of a
+speaker's official role onto their entry (``person_type``, gender, and the offices they
+hold), then hands a flat ``PersonEntry`` list to the resolver — mirroring how the
 deputies list is passed into the domain today.
 """
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 from qhld_ai.domain.mentions import (
@@ -73,6 +75,7 @@ from qhld_ai.domain.mentions import (
     build_deputy_index,
     make_person_entry,
     normalize_span,
+    office_families,
     resolve_person,
 )
 
@@ -257,23 +260,63 @@ def _bootstrap_entries(speakers, known, threshold):
             for person_id, (name, person_type, gender) in by_id.items()]
 
 
-def load_person_index(deputies, threshold, *, curated=None, nondeputy_speakers=None,
-                      deputy_aliases=None):
-    """The full match index: deputies + curated non-deputies + corpus-bootstrapped
-    non-deputy speakers, scored together in one pass by the resolver.
+def attach_offices(index, speaker_offices, threshold):
+    """Stamp each person's ``offices`` on their entry, from the offices the corpus records
+    them speaking under ("Presidente del Gobierno", "Ministra de Vivienda y Agenda
+    Urbana"). That is what lets a role apposition in a speech — "el presidente Sánchez" —
+    pick the holder out of a tied surname.
 
-    ``curated``, ``nondeputy_speakers`` and ``deputy_aliases`` can be injected (tests);
-    otherwise they are read from the data files and from
-    ``Speeches.distinct_nondeputy_speakers()``.
+    Applied to the ASSEMBLED index rather than while each tier is built, because an office
+    holder can be in any of them: the prime minister and any minister who kept their seat
+    are deputy records, the rest are bootstrapped speakers. Each speaker name is resolved
+    with the same ``resolve_person`` the bootstrap dedup uses, so a person is matched here
+    exactly as they would be if a speech named them; a name that does not resolve (or
+    resolves ambiguously) records no office, which only leaves the cue with less to say.
+
+    A person's offices ACCUMULATE over their roles, since the corpus lists one row per
+    wording and per promotion ("Ministro de Economía…" then "Vicepresidente Primero del
+    Gobierno y Ministro de Economía…") and both offices remain true of them."""
+    families = {}
+    for row in speaker_offices or []:
+        speaker = row.get("speaker")
+        found = office_families(row.get("role"))
+        if not speaker or not found:
+            continue
+        entry = resolve_person(speaker, index, threshold)
+        if entry is not None:
+            families.setdefault(entry.person_id, set()).update(found)
+    if not families:
+        return index
+    return [replace(entry, offices=tuple(sorted(families[entry.person_id])))
+            if entry.person_id in families else entry
+            for entry in index]
+
+
+def load_person_index(deputies, threshold, *, curated=None, nondeputy_speakers=None,
+                      deputy_aliases=None, speaker_offices=None):
+    """The full match index: deputies + curated non-deputies + corpus-bootstrapped
+    non-deputy speakers, scored together in one pass by the resolver, each carrying the
+    offices the corpus records them holding.
+
+    ``curated``, ``nondeputy_speakers``, ``deputy_aliases`` and ``speaker_offices`` can be
+    injected (tests); otherwise they are read from the data files and from
+    ``Speeches.distinct_nondeputy_speakers()`` / ``Speeches.distinct_speaker_offices()``.
+    The two speaker queries differ on purpose: the bootstrap wants people who are NOT
+    deputies, while offices are wanted for everybody who holds one — the prime minister
+    included, and he sits in a parliamentary group.
     """
     if deputy_aliases is None:
         deputy_aliases = load_deputy_aliases()
     deputy_index = build_deputy_index(
         deputies, aliases=deputy_aliases_by_id(deputy_aliases))
     curated_entries = _curated_entries(load_curated() if curated is None else curated)
-    if nondeputy_speakers is None:
+    if nondeputy_speakers is None or speaker_offices is None:
         from tipi_data.repositories.speeches import Speeches
-        nondeputy_speakers = Speeches.distinct_nondeputy_speakers()
+        if nondeputy_speakers is None:
+            nondeputy_speakers = Speeches.distinct_nondeputy_speakers()
+        if speaker_offices is None:
+            speaker_offices = Speeches.distinct_speaker_offices()
     bootstrap = _bootstrap_entries(
         nondeputy_speakers, deputy_index + curated_entries, threshold)
-    return deputy_index + curated_entries + bootstrap
+    return attach_offices(
+        deputy_index + curated_entries + bootstrap, speaker_offices, threshold)
