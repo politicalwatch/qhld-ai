@@ -3,13 +3,13 @@
 Two data files here both hold a field called ``aliases``, and they do NOT reach the
 same places. What a name is allowed to do depends on which list it is in:
 
-===============================  ========  =======  ========
-curated list                     mentions  speaker  NER tags
-===============================  ========  =======  ========
-persons_catalog ``aliases``      yes       no       no
-deputy_aliases ``aliases``       yes       yes      no
-deputy_aliases ``tag_surfaces``  no        no       yes
-===============================  ========  =======  ========
+================================  ========  =======  ========
+curated list                      mentions  speaker  NER tags
+================================  ========  =======  ========
+persons_catalog ``aliases``       yes       no       no
+deputy_profiles ``aliases``       yes       yes      no
+deputy_profiles ``tag_surfaces``  no        no       yes
+================================  ========  =======  ========
 
 - *mentions* — the alias becomes another key on that person's ``PersonEntry``, so a
   span resolves to them. Keys are scored as a MAX, never summed, so a list of variants
@@ -23,7 +23,14 @@ deputy_aliases ``tag_surfaces``  no        no       yes
   can create spans rather than merely resolve them, so it is the one with real
   precision risk, and it has its own rules (below).
 
-Deputies come from the catalog plus ``deputy_aliases.json``, for the ones the public
+Both files also carry ``roles``, which reaches nothing in the table above: it is not a
+name but the offices its holder is known for, and it exists because the office a speech
+names somebody by resolves the surname they share with somebody else ("el presidente
+Sánchez"). Offices are normally derived from the corpus — the role a person spoke under —
+so only what the corpus cannot witness needs curating: a party presidency, or a ministry
+held before our sessions begin. See ``curated_offices``.
+
+Deputies come from the catalog plus ``deputy_profiles.json``, for the ones the public
 knows by another name than the official one — "Tesh Sidi" for "Andala Ubbi, Teslem".
 Such a name shares no token with the catalog entry, so no threshold can reach it; it
 has to be curated. The file lives here rather than on the deputy document because the
@@ -80,7 +87,7 @@ from qhld_ai.domain.mentions import (
 )
 
 CATALOG_FILE = Path(__file__).parent / "persons_catalog.json"
-DEPUTY_ALIASES_FILE = Path(__file__).parent / "deputy_aliases.json"
+DEPUTY_PROFILES_FILE = Path(__file__).parent / "deputy_profiles.json"
 
 
 def load_curated(path=CATALOG_FILE):
@@ -93,9 +100,9 @@ def load_curated(path=CATALOG_FILE):
         return json.load(fh)
 
 
-def load_deputy_aliases(path=DEPUTY_ALIASES_FILE):
-    """Read the curated deputy-alias records (a JSON array of
-    ``{deputy_id, name, aliases, tag_surfaces}``).
+def load_deputy_profiles(path=DEPUTY_PROFILES_FILE):
+    """Read the curated deputy records (a JSON array of
+    ``{deputy_id, name, aliases, tag_surfaces, roles}``).
 
     Unlike the non-deputy catalog, these records reach two further places: ``aliases``
     also build the speaker-path alias index, and ``tag_surfaces`` — a SEPARATE, stricter
@@ -260,7 +267,35 @@ def _bootstrap_entries(speakers, known, threshold):
             for person_id, (name, person_type, gender) in by_id.items()]
 
 
-def attach_offices(index, speaker_offices, threshold):
+def curated_offices(records, id_key="person_id"):
+    """``{person_id: {family, …}}`` from the curated ``roles`` — the offices a person
+    holds that the corpus cannot tell us about.
+
+    The corpus is the primary source (see ``attach_offices``): whoever speaks under an
+    official title is stamped with it automatically, which covers every sitting minister
+    for free. What it cannot cover is an office held OUTSIDE this Congress or BEFORE these
+    sessions — "Presidente del Partido Popular", a ministry from a previous term, a
+    regional presidency — and those are precisely the offices a debate names people by
+    ("el presidente Feijóo", "el ministro Ábalos"). Both curated files therefore carry
+    ``roles``, and both are read the same way: the title string goes through the domain's
+    own ``office_families``, so a curator writes a title rather than a vocabulary token,
+    and a title naming no office we know ("Rey de España") contributes nothing instead of
+    a wrong guess.
+
+    Keyed by id, not resolved by name like the corpus rows, because a curated record
+    already carries the id — there is nothing to guess and no fuzzy match to get wrong."""
+    offices = {}
+    for row in records or []:
+        person_id = row.get(id_key)
+        families = set()
+        for role in row.get("roles", ()):
+            families |= office_families(role)
+        if person_id and families:
+            offices.setdefault(person_id, set()).update(families)
+    return offices
+
+
+def attach_offices(index, speaker_offices, threshold, curated=None):
     """Stamp each person's ``offices`` on their entry, from the offices the corpus records
     them speaking under ("Presidente del Gobierno", "Ministra de Vivienda y Agenda
     Urbana"). That is what lets a role apposition in a speech — "el presidente Sánchez" —
@@ -275,8 +310,11 @@ def attach_offices(index, speaker_offices, threshold):
 
     A person's offices ACCUMULATE over their roles, since the corpus lists one row per
     wording and per promotion ("Ministro de Economía…" then "Vicepresidente Primero del
-    Gobierno y Ministro de Economía…") and both offices remain true of them."""
-    families = {}
+    Gobierno y Ministro de Economía…") and both offices remain true of them. ``curated``
+    (see ``curated_offices``) seeds the same accumulation with what no corpus row can say,
+    so a person keeps every office from either source — Rajoy is a former president AND a
+    former vice-president, and only the catalog knows it."""
+    families = {person_id: set(offices) for person_id, offices in (curated or {}).items()}
     for row in speaker_offices or []:
         speaker = row.get("speaker")
         found = office_families(row.get("role"))
@@ -293,23 +331,24 @@ def attach_offices(index, speaker_offices, threshold):
 
 
 def load_person_index(deputies, threshold, *, curated=None, nondeputy_speakers=None,
-                      deputy_aliases=None, speaker_offices=None):
+                      deputy_profiles=None, speaker_offices=None):
     """The full match index: deputies + curated non-deputies + corpus-bootstrapped
     non-deputy speakers, scored together in one pass by the resolver, each carrying the
-    offices the corpus records them holding.
+    offices the corpus records them holding plus the ones only the catalog knows.
 
-    ``curated``, ``nondeputy_speakers``, ``deputy_aliases`` and ``speaker_offices`` can be
+    ``curated``, ``nondeputy_speakers``, ``deputy_profiles`` and ``speaker_offices`` can be
     injected (tests); otherwise they are read from the data files and from
     ``Speeches.distinct_nondeputy_speakers()`` / ``Speeches.distinct_speaker_offices()``.
     The two speaker queries differ on purpose: the bootstrap wants people who are NOT
     deputies, while offices are wanted for everybody who holds one — the prime minister
     included, and he sits in a parliamentary group.
     """
-    if deputy_aliases is None:
-        deputy_aliases = load_deputy_aliases()
+    if deputy_profiles is None:
+        deputy_profiles = load_deputy_profiles()
     deputy_index = build_deputy_index(
-        deputies, aliases=deputy_aliases_by_id(deputy_aliases))
-    curated_entries = _curated_entries(load_curated() if curated is None else curated)
+        deputies, aliases=deputy_aliases_by_id(deputy_profiles))
+    curated_records = load_curated() if curated is None else curated
+    curated_entries = _curated_entries(curated_records)
     if nondeputy_speakers is None or speaker_offices is None:
         from tipi_data.repositories.speeches import Speeches
         if nondeputy_speakers is None:
@@ -319,4 +358,6 @@ def load_person_index(deputies, threshold, *, curated=None, nondeputy_speakers=N
     bootstrap = _bootstrap_entries(
         nondeputy_speakers, deputy_index + curated_entries, threshold)
     return attach_offices(
-        deputy_index + curated_entries + bootstrap, speaker_offices, threshold)
+        deputy_index + curated_entries + bootstrap, speaker_offices, threshold,
+        curated=(curated_offices(curated_records)
+                 | curated_offices(deputy_profiles, "deputy_id")))

@@ -1,0 +1,48 @@
+[
+  {
+    "deputy_id": "andala-ubbi-teslem",
+    "name": "Andala Ubbi, Teslem",
+    "aliases": ["Tesh Sidi"],
+    "tag_surfaces": ["Tesh"]
+  },
+  {
+    "deputy_id": "nunez-feijoo-alberto",
+    "name": "Núñez Feijóo, Alberto",
+    "roles": ["Presidente del Partido Popular", "Presidente de la Xunta de Galicia"]
+  },
+  {
+    "deputy_id": "abascal-conde-santiago",
+    "name": "Abascal Conde, Santiago",
+    "roles": ["Presidente de VOX"]
+  },
+  {
+    "deputy_id": "abalos-meco-jose-luis",
+    "name": "Ábalos Meco, José Luis",
+    "roles": ["Ministro de Transportes, Movilidad y Agenda Urbana"]
+  },
+  {
+    "deputy_id": "iceta-i-llorens-miquel",
+    "name": "Iceta i Llorens, Miquel",
+    "roles": ["Ministro de Cultura y Deporte", "Ministro de Política Territorial y Función Pública"]
+  },
+  {
+    "deputy_id": "narbona-ruiz-cristina",
+    "name": "Narbona Ruiz, Cristina",
+    "roles": ["Ministra de Medio Ambiente", "Presidenta del Partido Socialista Obrero Español"]
+  },
+  {
+    "deputy_id": "batet-lamana-meritxell",
+    "name": "Batet Lamaña, Meritxell",
+    "roles": ["Presidenta del Congreso de los Diputados", "Ministra de Política Territorial y Función Pública"]
+  },
+  {
+    "deputy_id": "pastor-julian-ana-maria",
+    "name": "Pastor Julián, Ana María",
+    "roles": ["Ministra de Fomento", "Presidenta del Congreso de los Diputados"]
+  },
+  {
+    "deputy_id": "sanchez-jimenez-raquel",
+    "name": "Sánchez Jiménez, Raquel",
+    "roles": ["Ministra de Transportes, Movilidad y Agenda Urbana"]
+  }
+]

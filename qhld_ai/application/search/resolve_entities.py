@@ -63,7 +63,7 @@ from thefuzz import fuzz, process
 
 from qhld_ai.application.persons_catalog import (
     alias_index,
-    load_deputy_aliases,
+    load_deputy_profiles,
     load_person_index,
 )
 from qhld_ai.domain.entities import normalize_entity
@@ -159,33 +159,34 @@ class Resolution:
 class EntityResolver:
     def __init__(self, distinct, groups, deputies=None, mention_threshold=90,
                  curated=None, nondeputy_speakers=None, curated_aliases=None,
-                 deputy_aliases=None):
+                 deputy_profiles=None):
         """``distinct`` is ``callable(key) -> set`` over the target collection's
         payload; ``groups`` is the list of ``ParliamentaryGroup`` records. ``deputies``
         (the ``Deputy`` catalog) enables resolving mentioned persons; when given, the
         full person index (deputies + curated non-deputies + bootstrapped speakers) is
         built with the SAME assembler used to tag the corpus, so a query resolves to the
         same ids that were indexed. ``curated``/``nondeputy_speakers``/``curated_aliases``
-        /``deputy_aliases`` may be injected (tests); otherwise they are read from the
+        /``deputy_profiles`` may be injected (tests); otherwise they are read from the
         data files / ``Speeches``. Omit ``deputies`` => mentioned-person queries are left
         unfiltered, but curated deputy aliases still serve the speaker path, which needs
         no catalog."""
         self._distinct = distinct
         if curated_aliases is None:
             curated_aliases = load_curated_group_aliases()
-        if deputy_aliases is None:
-            deputy_aliases = load_deputy_aliases()
+        if deputy_profiles is None:
+            deputy_profiles = load_deputy_profiles()
         (self._group_aliases, self._group_aliases_normalized,
          self._group_categories) = _build_group_aliases(groups, curated_aliases)
-        self._alias_index = alias_index(deputy_aliases)
+        self._alias_index = alias_index(deputy_profiles)
         self._person_index = (
-            # No offices: they exist for the index-time role-apposition cue ("el
+            # No corpus offices: they exist for the index-time role-apposition cue ("el
             # presidente Sánchez"), which reads a speech's own wording. A query carries no
             # such cue, so the aggregation behind them would be paid for nothing and the
-            # resolutions are identical without it.
+            # resolutions are identical without it. The curated ones ride along with the
+            # data files that are loaded anyway, and are equally inert here.
             load_person_index(deputies, mention_threshold,
                               curated=curated, nondeputy_speakers=nondeputy_speakers,
-                              deputy_aliases=deputy_aliases, speaker_offices=[])
+                              deputy_profiles=deputy_profiles, speaker_offices=[])
             if deputies else [])
         self._mention_threshold = mention_threshold
 

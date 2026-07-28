@@ -1,6 +1,6 @@
 """Unit tests for the person-catalog assembler's curated inputs — pure, no Mongo.
 
-Also lints the shipped ``deputy_aliases.json``: a hand-edited data file is the one
+Also lints the shipped ``deputy_profiles.json``: a hand-edited data file is the one
 part of this feature no code change can protect, so its invariants are asserted here.
 """
 
@@ -9,10 +9,11 @@ import pytest
 from qhld_ai.application.persons_catalog import (
     _gender_from_role,
     alias_index,
+    curated_offices,
     deputy_aliases_by_id,
     gazetteer_surfaces,
     load_curated,
-    load_deputy_aliases,
+    load_deputy_profiles,
     load_person_index,
 )
 from qhld_ai.domain.mentions import normalize_span, resolve_person
@@ -84,28 +85,30 @@ def test_alias_index_skips_aliases_that_normalize_away():
 def test_aliases_reach_the_assembled_person_index():
     index = load_person_index(
         [FakeDeputy("andala-ubbi-teslem", "Andala Ubbi, Teslem")], 90,
-        curated=[], nondeputy_speakers=[], deputy_aliases=RECORDS, speaker_offices=[])
+        curated=[], nondeputy_speakers=[], deputy_profiles=RECORDS, speaker_offices=[])
     assert resolve_person("Tesh Sidi", index, 90).person_id == "andala-ubbi-teslem"
 
 
 # --- lint of the shipped data file -----------------------------------------
 
-def test_shipped_alias_file_is_well_formed():
-    records = load_deputy_aliases()
-    assert records, "the file exists to carry at least one curated alias"
+def test_shipped_profile_file_is_well_formed():
+    records = load_deputy_profiles()
+    assert records, "the file exists to carry at least one curated record"
     for row in records:
         assert row.get("deputy_id"), row
         assert row.get("name"), row
-        assert row.get("aliases"), row
         assert "," in row["name"], f"canonical name must be 'Apellido, Nombre': {row}"
-        for alias in row["aliases"]:
+        # A record earns its place by carrying at least one of the three curated things;
+        # an entry with none of them is a typo, not data.
+        assert (row.get("aliases") or row.get("tag_surfaces") or row.get("roles")), row
+        for alias in row.get("aliases", ()):
             assert normalize_span(alias), f"alias normalizes away: {alias!r}"
 
 
 def test_shipped_aliases_are_unique_across_records():
     seen = set()
-    for row in load_deputy_aliases():
-        for alias in row["aliases"]:
+    for row in load_deputy_profiles():
+        for alias in row.get("aliases", ()):
             key = normalize_span(alias)
             assert key not in seen, f"duplicate alias across records: {alias!r}"
             seen.add(key)
@@ -134,7 +137,7 @@ def test_shipped_tag_surfaces_are_out_of_vocabulary():
     # silently ignored, so curating one is a curation error worth catching here.
     spacy = pytest.importorskip("spacy")
     nlp = spacy.load(get_settings().ner_model)
-    for row in load_deputy_aliases():
+    for row in load_deputy_profiles():
         for surface in row.get("tag_surfaces", ()):
             assert nlp.vocab[surface.lower()].is_oov, (
                 f"{surface!r} is in-vocabulary, so the adapter will ignore it")
@@ -155,7 +158,7 @@ PROMOTED = [
 
 def _index(speakers, offices=()):
     return load_person_index([], 90, curated=[], nondeputy_speakers=speakers,
-                             deputy_aliases=[], speaker_offices=list(offices))
+                             deputy_profiles=[], speaker_offices=list(offices))
 
 
 def test_a_person_id_never_appears_twice_in_the_index():
@@ -255,7 +258,7 @@ def test_curated_records_thread_their_gender():
     curated = [{"person_id": "x", "person_type": "former_pm", "name": "Aznar López, José",
                 "aliases": ["Aznar"], "gender": "Hombre"}]
     index = load_person_index([], 90, curated=curated, nondeputy_speakers=[],
-                              deputy_aliases=[], speaker_offices=[])
+                              deputy_profiles=[], speaker_offices=[])
     assert index[0].gender == "Hombre"
 
 
@@ -267,9 +270,9 @@ def test_shipped_curated_catalog_declares_a_gender_for_everyone():
 
 
 # --- offices, for the role-apposition cue ------------------------------------
-# Who holds which office comes from the roles the corpus records people SPEAKING under,
-# which is the only place it exists — the deputy record carries committee posts, not
-# government ones.
+# Who holds which office comes from the roles the corpus records people SPEAKING under —
+# the deputy record carries committee posts, not government ones — plus, for the offices
+# no corpus row can witness, the curated ``roles`` of either data file.
 
 PM = [{"speaker": "Sánchez Pérez-Castejón, Pedro", "role": "Presidente del Gobierno"}]
 
@@ -279,7 +282,7 @@ def test_an_office_reaches_the_deputy_who_holds_it():
     # — and the reason offices are stamped on the assembled index rather than per tier.
     index = load_person_index(
         [FakeDeputy("sanchez-perez-castejon-pedro", "Sánchez Pérez-Castejón, Pedro")], 90,
-        curated=[], nondeputy_speakers=[], deputy_aliases=[], speaker_offices=PM)
+        curated=[], nondeputy_speakers=[], deputy_profiles=[], speaker_offices=PM)
     assert index[0].offices == ("presidente",)
 
 
@@ -299,3 +302,56 @@ def test_a_role_with_no_office_and_an_unknown_speaker_are_both_no_ops():
     rows = [{"speaker": "Pérez Pérez, Ana", "role": "Compareciente"},
             {"speaker": "Nadie Que Exista, Juan", "role": "Ministro de Todo"}]
     assert [e.offices for e in _index(rows[:1], rows)] == [()]
+
+
+# --- curated offices: the ones the corpus cannot witness ---------------------
+# A party presidency, a regional one, a ministry from a previous term. None of them is a
+# role anybody speaks under in this Congress, and all of them are how a debate names
+# people ("el presidente Feijóo", "el ministro Ábalos").
+
+def test_curated_offices_are_read_off_the_title_by_family():
+    assert curated_offices([{"person_id": "x", "roles": ["Presidenta de la Comunidad"]}]) \
+        == {"x": {"presidente"}}
+    # a title naming no office we know contributes nothing rather than a wrong guess
+    assert curated_offices([{"person_id": "k", "roles": ["Rey de España"]}]) == {}
+    assert curated_offices([{"person_id": "y"}]) == {}
+    assert curated_offices(None) == {}
+
+
+def test_a_curated_non_deputy_carries_the_office_their_title_names():
+    curated = [{"person_id": "x", "person_type": "regional_president",
+                "name": "Illa Roca, Salvador", "aliases": ["Illa"], "gender": "Hombre",
+                "roles": ["Presidente de la Generalitat de Cataluña"]}]
+    index = load_person_index([], 90, curated=curated, nondeputy_speakers=[],
+                              deputy_profiles=[], speaker_offices=[])
+    assert index[0].offices == ("presidente",)
+
+
+def test_a_deputy_profile_carries_an_office_no_speech_could_show():
+    # The party presidency is exactly what "el presidente Feijóo" names, and no corpus
+    # role will ever say it — he speaks as a deputy.
+    profiles = [{"deputy_id": "nunez-feijoo-alberto", "name": "Núñez Feijóo, Alberto",
+                 "roles": ["Presidente del Partido Popular"]}]
+    index = load_person_index(
+        [FakeDeputy("nunez-feijoo-alberto", "Núñez Feijóo, Alberto")], 90,
+        curated=[], nondeputy_speakers=[], deputy_profiles=profiles, speaker_offices=[])
+    assert index[0].offices == ("presidente",)
+
+
+def test_curated_and_corpus_offices_accumulate():
+    # Both are true of the person, and the cue may name either.
+    profiles = [{"deputy_id": "sanchez-perez-castejon-pedro",
+                 "name": "Sánchez Pérez-Castejón, Pedro",
+                 "roles": ["Ministra de Medio Ambiente"]}]
+    index = load_person_index(
+        [FakeDeputy("sanchez-perez-castejon-pedro", "Sánchez Pérez-Castejón, Pedro")], 90,
+        curated=[], nondeputy_speakers=[], deputy_profiles=profiles, speaker_offices=PM)
+    assert index[0].offices == ("ministro", "presidente")
+
+
+def test_shipped_curated_roles_are_usable_titles():
+    # Hand-edited data: a role that is not a string, or that normalizes to nothing, is a
+    # typo. A title with no recognised office is fine (the King's is deliberate).
+    for row in load_curated() + load_deputy_profiles():
+        for role in row.get("roles", ()):
+            assert isinstance(role, str) and role.strip(), row

@@ -48,11 +48,11 @@ DEPUTIES = [
 
 
 def _resolver(**overrides):
-    # curated/nondeputy_speakers/curated_aliases/deputy_aliases injected → no
+    # curated/nondeputy_speakers/curated_aliases/deputy_profiles injected → no
     # Mongo/data-file I/O happens in these unit tests.
     defaults = dict(
         distinct=lambda key: CORPUS.get(key, set()), groups=GROUPS, deputies=DEPUTIES,
-        curated=[], nondeputy_speakers=[], curated_aliases=[], deputy_aliases=[])
+        curated=[], nondeputy_speakers=[], curated_aliases=[], deputy_profiles=[])
     return EntityResolver(**{**defaults, **overrides})
 
 
@@ -108,7 +108,7 @@ def _alias_resolver(**overrides):
     """Resolver whose corpus has spoken for Teslem and whose alias file is curated."""
     corpus = {**CORPUS, "speaker": CORPUS["speaker"] | {"Andala Ubbi, Teslem"}}
     return _resolver(distinct=lambda key: corpus.get(key, set()),
-                     deputies=[*DEPUTIES, TESLEM], deputy_aliases=TESH_ALIAS,
+                     deputies=[*DEPUTIES, TESLEM], deputy_profiles=TESH_ALIAS,
                      **overrides)
 
 
@@ -129,7 +129,7 @@ def test_speaker_alias_tolerates_honorifics_and_casing():
 def test_speaker_alias_falls_through_when_corpus_lacks_that_speaker():
     # A curated deputy who has not spoken (or a stale curation) must not filter on a
     # name the corpus never had: the outcome stays exactly what it is today.
-    r = _resolver(deputy_aliases=TESH_ALIAS, deputies=[*DEPUTIES, TESLEM]).resolve(
+    r = _resolver(deputy_profiles=TESH_ALIAS, deputies=[*DEPUTIES, TESLEM]).resolve(
         ParsedQuery(semantic_query="x", speakers=["Tesh Sidi"]))
     assert "speaker" not in r.filters
     assert r.blocked
@@ -142,7 +142,7 @@ def test_speaker_alias_works_without_the_deputies_catalog():
     corpus = {**CORPUS, "speaker": CORPUS["speaker"] | {"Andala Ubbi, Teslem"}}
     resolver = EntityResolver(
         distinct=lambda key: corpus.get(key, set()), groups=GROUPS,
-        curated_aliases=[], deputy_aliases=TESH_ALIAS)
+        curated_aliases=[], deputy_profiles=TESH_ALIAS)
     r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Tesh Sidi"]))
     assert r.filters["speaker"] == "Andala Ubbi, Teslem"
 
@@ -487,7 +487,7 @@ def test_mentioned_person_ignored_without_deputies_catalog():
     # filtering — that must NOT read as an unsatisfiable query.
     resolver = EntityResolver(
         distinct=lambda key: CORPUS.get(key, set()), groups=GROUPS, curated_aliases=[],
-        deputy_aliases=[])
+        deputy_profiles=[])
     r = resolver.resolve(ParsedQuery(semantic_query="x", mentioned_persons=["Montero"]))
     assert "mentions" not in r.filters
     assert not r.blocked
