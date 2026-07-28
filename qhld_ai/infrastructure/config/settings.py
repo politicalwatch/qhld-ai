@@ -120,6 +120,11 @@ class Settings(BaseSettings):
     # pooled per speech, so one such form settles every bare occurrence of that surname in
     # it. Off => shared surnames are dropped unless a fuller form disambiguates them.
     mention_gender_gate: bool = True
+    # Attach a surname that stayed ambiguous to the one tied person the same speech names
+    # elsewhere by a fuller form. It never introduces a person the speech does not
+    # already name — it only stops their remaining occurrences going uncounted. Off =>
+    # those occurrences are dropped.
+    mention_speech_coreference: bool = True
 
 
 @lru_cache

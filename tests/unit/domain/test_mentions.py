@@ -247,14 +247,14 @@ def test_match_person_below_threshold_reports_near_miss():
     match = match_person("Monteros Cuadrados", INDEX, 101)  # force a miss
     assert match.entry is None
     assert 0 < match.best_score < 101
-    assert "Montero Cuadrado, María Jesús" in match.candidates
+    assert "Montero Cuadrado, María Jesús" in match.candidate_names
 
 
 def test_match_person_ambiguous_reports_tied_names():
     match = match_person("García", INDEX, 90)
     assert match.entry is None
     assert match.best_score >= 90
-    assert set(match.candidates) == {"García López, Ana", "García Ruiz, Juan"}
+    assert set(match.candidate_names) == {"García López, Ana", "García Ruiz, Juan"}
 
 
 def test_match_person_empty_span_has_no_diagnostics():
@@ -602,10 +602,76 @@ def test_an_all_conflicting_tie_is_left_to_the_ambiguity_guard():
 
 def test_query_resolution_is_unchanged_by_gender():
     assert resolve_person("Muñoz", MUNOZ_INDEX, 90) is None
-    assert match_person("Muñoz", MUNOZ_INDEX, 90).candidates == [
+    assert match_person("Muñoz", MUNOZ_INDEX, 90).candidate_names == [
         "Muñoz de la Iglesia, Ester", "Muñoz Abrines, Pedro"]
 
 
 def test_a_courtesy_form_in_a_query_is_stripped_not_used():
     # Honorifics are normalized away on the query side, exactly as before.
     assert resolve_person("la señora Muñoz", MUNOZ_INDEX, 90) is None
+
+
+# --- same-speech coreference -----------------------------------------------
+# A surname the guard drops is decidable when the speech names exactly one of the tied
+# people elsewhere in full: within one speech, one surname means one person.
+
+def _counts(mentions):
+    return {m.name: m.count for m in mentions}
+
+
+def test_a_tied_surname_joins_the_person_the_speech_names_in_full():
+    mentions = resolve_mentions(
+        ["Ester Muñoz de la Iglesia", "señora Muñoz", "Muñoz"], MUNOZ_INDEX, 90)
+    assert _counts(mentions) == {"Muñoz de la Iglesia, Ester": 3}
+
+
+def test_nothing_attaches_when_the_speech_names_both_of_the_tied_people():
+    # The hard case: two holders of the surname are each named in full, so the bare
+    # occurrences are genuinely undecidable and must stay dropped.
+    mentions = resolve_mentions(
+        ["Ester Muñoz de la Iglesia", "Pedro Muñoz Abrines", "Muñoz"],
+        MUNOZ_INDEX, 90, gender_gate=False)
+    assert _counts(mentions) == {
+        "Muñoz de la Iglesia, Ester": 1, "Muñoz Abrines, Pedro": 1}
+
+
+def test_nothing_attaches_when_no_tied_person_is_named_elsewhere():
+    assert resolve_mentions(["Muñoz", "Muñoz"], MUNOZ_INDEX, 90) == []
+
+
+def test_coreference_does_not_rescue_a_bare_given_name():
+    # "Pedro" ties two people and names neither of them; the surname gate keeps it
+    # dropped even though one of them is named in full elsewhere.
+    index = build_deputy_index([MUNOZ_M, FakeDeputy("p2", "Casares Hontañón, Pedro")])
+    mentions = resolve_mentions(
+        ["Pedro Muñoz Abrines", "Pedro"], index, 90, gender_gate=False)
+    assert _counts(mentions) == {"Muñoz Abrines, Pedro": 1}
+
+
+def test_coreference_does_not_rescue_a_span_that_missed_the_threshold():
+    # A near miss carries candidates too, but it is a failed match, not a tie.
+    mentions = resolve_mentions(
+        ["Ester Muñoz de la Iglesia", "Muñoces"], MUNOZ_INDEX, 95)
+    assert _counts(mentions) == {"Muñoz de la Iglesia, Ester": 1}
+
+
+def test_coreference_still_honours_the_excluded_surnames():
+    mentions = resolve_mentions(
+        ["Ester Muñoz de la Iglesia", "Muñoz"], MUNOZ_INDEX, 90,
+        frozenset({"muñoz"}))
+    assert mentions == []
+
+
+def test_coreference_off_leaves_the_tied_occurrences_dropped():
+    mentions = resolve_mentions(
+        ["Ester Muñoz de la Iglesia", "Muñoz"], MUNOZ_INDEX, 90, coreference=False)
+    assert _counts(mentions) == {"Muñoz de la Iglesia, Ester": 1}
+
+
+def test_coreference_does_not_chain_through_its_own_attachments():
+    # Only first-pass resolutions are evidence, so the outcome cannot depend on the
+    # order the spans arrive in.
+    spans = ["Ester Muñoz de la Iglesia", "Muñoz", "Pedro Muñoz Abrines"]
+    assert _counts(resolve_mentions(spans, MUNOZ_INDEX, 90, gender_gate=False)) == \
+        _counts(resolve_mentions(list(reversed(spans)), MUNOZ_INDEX, 90,
+                                 gender_gate=False))

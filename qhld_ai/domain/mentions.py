@@ -19,6 +19,11 @@ a surname alone resolves but noise does not. Because bare surnames collide acros
 deputies ("García"), an **ambiguity guard** drops any span whose top score is
 shared by two or more deputies — favouring a missed mention over a wrong one.
 
+Two cues recover what that guard would otherwise throw away, and both read the
+whole speech rather than one span: the gender a courtesy form implies ("la señora
+Muñoz" cannot be the male Muñoz) and, for what is still tied afterwards, the one
+tied person the speech names elsewhere in full.
+
 Kept pure (takes a prebuilt index, returns ``Mention`` objects) so it is unit-
 testable offline with no Mongo, mirroring ``domain.speeches.segmentation``.
 """
@@ -337,11 +342,16 @@ def _break_tie(norm: str, tied: list[PersonEntry]) -> list[PersonEntry]:
 class PersonMatch:
     """Outcome of matching one span against the catalog. ``entry`` is the resolved
     person, or ``None`` on failure; ``best_score`` and ``candidates`` then describe the
-    failure — the top fuzzy score with the near-miss names when nothing cleared the
-    threshold, or the still-tied names when a surname stayed ambiguous."""
+    failure — the top-scoring near misses when nothing cleared the threshold, or the
+    still-tied people when a surname stayed ambiguous. Candidates are full entries, not
+    just names, so a caller can carry on reasoning about who they are."""
     entry: PersonEntry | None
     best_score: int = 0
-    candidates: list[str] = field(default_factory=list)
+    candidates: list[PersonEntry] = field(default_factory=list)
+
+    @property
+    def candidate_names(self) -> list[str]:
+        return [entry.name for entry in self.candidates]
 
 
 def resolve_person(name: str, index: list[PersonEntry], threshold: int) -> PersonEntry | None:
@@ -363,12 +373,6 @@ def match_person(name: str, index: list[PersonEntry], threshold: int) -> PersonM
     return _match_one(norm, index, threshold)
 
 
-def _resolve_one(norm: str, index: list[PersonEntry], threshold: int, gender=None):
-    """Best-scoring person for a normalized span, or ``None`` when nothing clears the
-    threshold or the top score stays shared after tie-breaking (ambiguous surname)."""
-    return _match_one(norm, index, threshold, gender=gender).entry
-
-
 def _match_one(norm: str, index: list[PersonEntry], threshold: int,
                gender=None) -> PersonMatch:
     """``gender`` is the courtesy form's gender read off the RAW span (see
@@ -384,7 +388,7 @@ def _match_one(norm: str, index: list[PersonEntry], threshold: int,
         elif score == best_score and best_score > 0:
             tied.append(entry)
     if best_score < threshold:
-        return PersonMatch(None, best_score, [e.name for e in tied])
+        return PersonMatch(None, best_score, tied)
     if len(tied) > 1 and gender and _names_a_surname(norm, tied):
         # Before any preference rule: a gendered courtesy form is a hard fact about who is
         # being named, so it outranks the deputy preference below. Without this, "la señora
@@ -417,7 +421,7 @@ def _match_one(norm: str, index: list[PersonEntry], threshold: int,
         tied = _break_tie(norm, tied)
     if len(tied) == 1:
         return PersonMatch(tied[0], best_score)
-    return PersonMatch(None, best_score, [e.name for e in tied])
+    return PersonMatch(None, best_score, tied)
 
 
 def _prefer_overrides(norm: str, tied: list[PersonEntry]) -> list[PersonEntry]:
@@ -475,33 +479,72 @@ def _gender_cues(spans) -> dict[str, str]:
     return {norm: next(iter(cues)) for norm, cues in seen.items() if len(cues) == 1}
 
 
+def _coreferents(matches: dict[str, PersonMatch], threshold: int) -> dict[str, PersonEntry]:
+    """Map each still-ambiguous surface to the one tied person the speech names
+    elsewhere — same-speech coreference.
+
+    A bare "Muñoz" tied between two catalog Muñoz is undecidable on its own, but if the
+    speech also says "Ester Muñoz de la Iglesia" and never names the other one, the
+    ambiguity is only apparent: within one speech a surname is used for one person.
+    Requiring EXACTLY one of the tied people to be named elsewhere is what makes this
+    safe — when both are ("Patxi López" and "Óscar López" in the same speech), nothing
+    is attached and the guard still drops the span.
+
+    It can therefore only add occurrences to somebody the speech already names, never a
+    new person; what it can get wrong is the count, when the other bearer of the surname
+    is outside the catalog and so never resolves ("David Sánchez Pérez-Castejón").
+
+    Near misses are skipped: ``candidates`` also holds the closest people when nothing
+    reached the threshold, and those are failed matches, not ties."""
+    resolved = {match.entry.person_id for match in matches.values() if match.entry}
+    coreferents = {}
+    for norm, match in matches.items():
+        if match.entry is not None or len(match.candidates) < 2:
+            continue
+        if match.best_score < threshold:
+            continue
+        if not _names_a_surname(norm, match.candidates):
+            continue
+        named = [e for e in match.candidates if e.person_id in resolved]
+        if len(named) == 1:
+            coreferents[norm] = named[0]
+    return coreferents
+
+
 def resolve_mentions(
     spans, index: list[PersonEntry], threshold: int,
     excluded_surnames: frozenset[str] = frozenset(), *,
-    gender_gate: bool = True) -> list[Mention]:
+    gender_gate: bool = True, coreference: bool = True) -> list[Mention]:
     """Collapse raw NER ``spans`` (duplicates preserved) into canonical ``Mention``s.
 
-    Each span is normalized then resolved (cached per normalized form). Occurrences
-    that resolve to the same person are merged: ``count`` totals them and
+    Each span is normalized then resolved (once per distinct normalized form).
+    Occurrences that resolve to the same person are merged: ``count`` totals them and
     ``surface_forms`` keeps the distinct raw spans seen. ``excluded_surnames`` drops
     spans that name a flagged non-deputy homonym of a DEPUTY (see ``_is_excluded``);
     it never touches a resolved non-deputy. Returns mentions ordered by descending
     count then name.
 
-    ``gender_gate`` lets a gendered courtesy form settle a surname the ambiguity guard
-    would otherwise drop ("la señora Muñoz" is the female Muñoz). It is speech-scoped —
-    hence computed here, where the whole span list is in hand, rather than per span."""
+    Two signals need the whole speech rather than one span, which is why the spans are
+    matched first and counted second. ``gender_gate`` lets a gendered courtesy form
+    settle a surname the ambiguity guard would otherwise drop ("la señora Muñoz" is the
+    female Muñoz). ``coreference`` then attaches the surnames still tied to the one tied
+    person the speech names elsewhere (see ``_coreferents``). Coreference reads only the
+    first pass, so no attachment can become evidence for another and the result does not
+    depend on the order the spans arrive in."""
     cues = _gender_cues(spans) if gender_gate else {}
-    cache: dict[str, PersonEntry | None] = {}
+    matches: dict[str, PersonMatch] = {}
+    for span in spans:
+        norm = normalize_span(span)
+        if norm and norm not in matches:
+            matches[norm] = _match_one(norm, index, threshold, gender=cues.get(norm))
+    coreferents = _coreferents(matches, threshold) if coreference else {}
+
     by_person: dict[str, dict] = {}
     for span in spans:
         norm = normalize_span(span)
         if not norm:
             continue
-        if norm not in cache:
-            cache[norm] = _resolve_one(
-                norm, index, threshold, gender=cues.get(norm))
-        entry = cache[norm]
+        entry = matches[norm].entry or coreferents.get(norm)
         if entry is None:
             continue
         # The homonym denylist / speech-scoped cues exist only to stop a famous

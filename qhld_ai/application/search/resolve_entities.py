@@ -336,11 +336,12 @@ class EntityResolver:
     def _person_suggestion(self, match: PersonMatch) -> str | None:
         """Human-readable hint for a failed person match: the tied names when the
         span was ambiguous, the closest near-miss otherwise."""
-        if not match.candidates:
+        names = match.candidate_names
+        if not names:
             return None
         if match.best_score >= self._mention_threshold:
-            return "ambiguous: " + " / ".join(f"'{name}'" for name in match.candidates)
-        return f"'{match.candidates[0]}' ({match.best_score})"
+            return "ambiguous: " + " / ".join(f"'{name}'" for name in names)
+        return f"'{names[0]}' ({match.best_score})"
 
     def _resolve_constituencies(self, result, raws):
         aliases = {}
