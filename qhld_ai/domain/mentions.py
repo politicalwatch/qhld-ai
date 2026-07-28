@@ -39,9 +39,8 @@ from thefuzz import fuzz
 from tipi_data.models.speech import Mention
 
 # Courtesy honorifics and articles spaCy often folds into a PER span. Stripped
-# before matching so "el señor Sánchez" resolves like "Sánchez". Kept deliberately
-# small: role words (ministro/presidente…) are left in — token_set_ratio tolerates
-# the extra token, whereas over-stripping risks matching a bare title to a name.
+# before matching so "el señor Sánchez" resolves like "Sánchez". Role words are
+# stripped too, but they live with the office vocabulary below (see ``_STRIPPED``).
 _HONORIFICS = {
     "el", "la", "los", "las", "un", "una", "al",
     "sr", "sra", "srs", "sras", "señor", "señora", "señores", "señoras",
@@ -94,6 +93,16 @@ _ROLE_APPOSED = re.compile(
     r"(?:(?:el|la)\s+)?(?:se[nñ]or(?:a)?|don|do[nñ]a)?\s*" + _NAMED)
 # "el señor Sánchez, presidente del Gobierno"
 _ROLE_AFTER = re.compile(rf"{_NAMED}\s*[,\-–—]\s*(?:(?:el|la)\s+)?\b({_ROLE_HEAD})\b")
+
+# Everything ``normalize_span`` throws away: courtesy forms, articles, and the role words
+# above. A role word inside the span is not free — the model does fold one in
+# ("ministro Torres"), and the extra token drops `token_set_ratio` to 71 against "Torres
+# Pérez, Ángel Víctor", i.e. below any workable threshold, so the mention was silently
+# lost. Measured over 800 speeches: 51 spans carry a role word, stripping resolves 4 that
+# failed, empties 46 that name nobody at all ("Señora ministra"), and changes no other
+# outcome. Nothing is lost by dropping the word here, because the office it names is read
+# off the surrounding TEXT (see ``role_cues``), not off the span.
+_STRIPPED = _HONORIFICS | set(_ROLE_FAMILIES)
 
 
 def span_gender(span: str) -> str | None:
@@ -367,6 +376,33 @@ def build_surname_gazetteer(deputies, *, extra=()) -> list[str]:
                   if count == 1 or first[key] == 1)
 
 
+def build_office_surfaces(index: list[PersonEntry]) -> dict[str, tuple[str, ...]]:
+    """Surname tokens borne by somebody the catalog records holding an office, mapped to
+    the families they hold — what a detector needs to tell "el ministro Cuerpo" (a person)
+    from "el cuerpo del texto" (not one).
+
+    Same division of labour as ``build_surname_gazetteer``: the catalog says what may be
+    LOOKED FOR, and the resolver still decides who was found. That is why a loose,
+    token-level membership test is enough here — a created span that resolves to nobody is
+    dropped like any other, so the gate only has to keep the detector away from ordinary
+    words.
+
+    Surnames only (the group before the comma), because a given name is not evidence: "el
+    ministro Carlos" names nobody in particular, while every minister's given name would
+    otherwise let a role word tag one. Distinctiveness is deliberately NOT required, unlike
+    the gazetteer's: this detector fires only next to a role word, so the context supplies
+    what distinctiveness supplies there — which is exactly why it reaches the common,
+    in-vocabulary surnames the gazetteer must leave alone."""
+    surfaces: dict[str, set[str]] = {}
+    for entry in index:
+        if not entry.offices:
+            continue
+        for token in _tokens(entry.name.partition(",")[0]):
+            if token not in _SURNAME_PARTICLES:
+                surfaces.setdefault(token, set()).update(entry.offices)
+    return {token: tuple(sorted(families)) for token, families in surfaces.items()}
+
+
 def normalize_span(span: str) -> str:
     """Lowercase, drop punctuation, courtesy honorifics/articles and role words. Returns
     the residual name, or "" when nothing usable remains ("Su Señoría", "Señora
@@ -552,6 +588,36 @@ def _gender_cues(spans) -> dict[str, str]:
     return {norm: next(iter(cues)) for norm, cues in seen.items() if len(cues) == 1}
 
 
+def role_appositions(text: str) -> list[tuple[int, int, str, str]]:
+    """Every role apposition in ``text`` as ``(start, end, name, family)``, ordered, where
+    the offsets are the NAME's — so one caller can pool it as a cue about a span that
+    exists (``role_cues``) and another can turn it into a span the model never made (the
+    NER adapter's apposition pass).
+
+    Both readings need the same three shapes, which is why they are compiled once here:
+    the tight apposition ("el presidente Sánchez"), the comma apposition, which is allowed
+    only when the role word carries its office complement because that is what a vocative
+    never does ("la ministra de Vivienda, Isabel Rodríguez"), and the postposed form ("el
+    señor Sánchez, presidente del Gobierno"). No comma and no sentence boundary may stand
+    between role word and name in the tight shape — that alone separates an apposition
+    from "señor presidente, la señora Montero", which addresses the chair and then names
+    somebody else.
+
+    Everything the shapes over-capture ("Gracias" after "señora presidenta", an office
+    complement like "Autoridad Palestina") is left for the caller to reject: a cue must
+    name a span the speech already has, and a created span must name somebody the catalog
+    records holding that office."""
+    found = []
+    for pattern, name_group, role_group in (
+            (_ROLE_BEFORE, 2, 1), (_ROLE_APPOSED, 2, 1), (_ROLE_AFTER, 1, 2)):
+        for match in pattern.finditer(text or ""):
+            family = _ROLE_FAMILIES.get(match.group(role_group).lower())
+            if family:
+                start, end = match.span(name_group)
+                found.append((start, end, match.group(name_group), family))
+    return sorted(found)
+
+
 def role_cues(text: str, spans) -> dict[str, str]:
     """Map each normalized surface to the office the speech names it by — "el presidente
     Sánchez" says the Sánchez meant here is the one holding the presidency, which no
@@ -571,13 +637,10 @@ def role_cues(text: str, spans) -> dict[str, str]:
     surfaces = {normalize_span(span) for span in spans}
     surfaces.discard("")
     seen: dict[str, set[str]] = {}
-    for pattern, name_group, role_group in (
-            (_ROLE_BEFORE, 2, 1), (_ROLE_APPOSED, 2, 1), (_ROLE_AFTER, 1, 2)):
-        for match in pattern.finditer(text or ""):
-            family = _ROLE_FAMILIES.get(match.group(role_group).lower())
-            norm = normalize_span(match.group(name_group))
-            if family and norm in surfaces:
-                seen.setdefault(norm, set()).add(family)
+    for _start, _end, name, family in role_appositions(text):
+        norm = normalize_span(name)
+        if norm in surfaces:
+            seen.setdefault(norm, set()).add(family)
     return {norm: next(iter(families))
             for norm, families in seen.items() if len(families) == 1}
 

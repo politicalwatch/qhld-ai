@@ -231,3 +231,83 @@ def test_an_article_that_belongs_to_the_name_is_kept():
     ner = _ner(gazetteer=["Berni"])
     for span in ner.person_spans("Lo publicó La Razón sobre el caso El Tito Berni."):
         assert "Razón" not in span or span.startswith("La")
+
+
+# --- role apposition: the names the model mislabels -------------------------
+# "El ministro Albares" comes back as MISC, "Cuerpo" as ORG. The role word is what says
+# the occurrence names a person, so the office map can cover surnames the gazetteer must
+# leave alone — these are all in vocabulary.
+
+_OFFICES = {"cuerpo": ("ministro",), "torres": ("ministro",),
+            "sánchez": ("presidente",)}
+
+
+def test_apposition_tags_a_name_the_model_mislabels():
+    text = "No sé si mañana el ministro Cuerpo hará alguna rectificación."
+    assert not any("Cuerpo" in s for s in _ner().person_spans(text))
+    spans = _ner(office_surfaces=_OFFICES).person_spans(text)
+    # the name alone: the role word is nobody's name and the span is the highlight target
+    assert "Cuerpo" in spans
+
+
+def test_apposition_keeps_the_courtesy_word_it_finds():
+    spans = _ner(office_surfaces=_OFFICES).person_spans(
+        "Aquí está el presidente señor Sánchez, que interviene ahora.")
+    assert any(s == "señor Sánchez" for s in spans)
+
+
+def test_apposition_does_not_tag_an_ordinary_word():
+    # Same surname, no office claimed for it: "cuerpo" stays an ordinary word.
+    spans = _ner(office_surfaces=_OFFICES).person_spans(
+        "El cuerpo del texto no dice nada.")
+    assert not any("uerpo" in s for s in spans)
+
+
+def test_apposition_needs_the_office_to_agree():
+    # Carlos Cuerpo is a minister, not a president, so this phrase names somebody else —
+    # and the model gives no PER span here, which leaves the gate as the only decider.
+    spans = _ner(office_surfaces=_OFFICES).person_spans(
+        "Lo dijo el presidente Cuerpo en su comparecencia.")
+    assert not any("uerpo" in s for s in spans)
+
+
+def test_the_office_gate_is_what_neutralises_the_vocative():
+    # "Gracias, presidenta" is the commonest role word in the corpus (151 captures per 800
+    # speeches) and names nobody. The patterns DO capture it — what makes it inert is that
+    # no office holder is called "Gracias".
+    from qhld_ai.domain.mentions import role_appositions
+
+    text = "Gracias, presidenta."
+    assert [name for _s, _e, name, _f in role_appositions(text)] == ["Gracias"]
+    assert _ner(office_surfaces=_OFFICES).person_spans(text) == []
+
+
+def test_apposition_never_overrides_a_model_person_span():
+    # The model already tagged this one as PER; the pass must not double it.
+    text = "Lo dijo el ministro Óscar Puente en la comisión."
+    ner = _ner(office_surfaces={"puente": ("ministro",)})
+    assert sum("Puente" in s for s in ner.person_spans(text)) == 1
+
+
+def test_a_leading_role_word_is_trimmed_from_the_model_span():
+    # The model does fold the role word in ("ministro Torres"); the span keeps the name,
+    # for the same reason the article is trimmed.
+    for span in _ner().person_spans(
+            "Lo ha hecho el ministro Torres ante la comisión de esta Cámara."):
+        assert not span.lower().startswith("ministro")
+
+
+def test_entity_spans_excludes_an_apposed_name():
+    # The wrong-label span is a person, so it must stop being a named entity — this is
+    # what put bare surnames in the theme filter.
+    text = "El ministro Cuerpo habló sobre Eurovisión."
+    ner = _ner(office_surfaces=_OFFICES)
+    assert "Cuerpo" in ner.person_spans(text)
+    entities = ner.entity_spans(text)
+    assert not any("Cuerpo" in s for s in entities)
+    assert any("Eurovisión" in s for s in entities)
+
+
+def test_no_office_map_leaves_the_adapter_as_it_was():
+    text = "No sé si mañana el ministro Cuerpo hará alguna rectificación."
+    assert _ner().person_spans(text) == _ner(office_surfaces={}).person_spans(text)

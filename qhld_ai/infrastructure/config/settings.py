@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     # entities ("Por tanto", "Llama la atención…") are dropped at the source. Off =>
     # every non-PER span is emitted (the raw model output).
     ner_entity_pos_gate: bool = True
+    # Tag the name in a role apposition the model missed or mislabelled ("El ministro
+    # Albares" comes back as MISC), when the catalog records somebody of that surname
+    # holding that office. Reaches the common in-vocabulary surnames the gazetteer must
+    # leave alone, because the role word is what says this occurrence names a person; the
+    # claimed span also stops being a named entity. Off => those mentions stay untagged.
+    ner_role_apposition: bool = True
     mention_match_threshold: int = 90
     # Let a gendered courtesy form decide a surname two catalog people share: "la señora
     # Muñoz" is the female Muñoz, so the ambiguity guard need not drop it. Evidence is

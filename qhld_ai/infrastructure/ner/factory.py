@@ -17,7 +17,8 @@ def _register(name: str):
     return decorator
 
 
-def create_ner_from_env(settings: Settings | None = None, gazetteer=None) -> NerPort:
+def create_ner_from_env(settings: Settings | None = None, gazetteer=None,
+                        office_surfaces=None) -> NerPort:
     from qhld_ai.infrastructure.config.settings import get_settings
 
     s = settings or get_settings()
@@ -25,7 +26,7 @@ def create_ner_from_env(settings: Settings | None = None, gazetteer=None) -> Ner
     if provider not in _PROVIDERS:
         raise ValueError(
             f"Unknown NER provider: {provider!r}. Valid: {list(_PROVIDERS)}")
-    return _PROVIDERS[provider](s, gazetteer=gazetteer)
+    return _PROVIDERS[provider](s, gazetteer=gazetteer, office_surfaces=office_surfaces)
 
 
 # Trigger adapter self-registration. The spaCy import is lazy inside the adapter,

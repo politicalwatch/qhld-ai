@@ -14,6 +14,14 @@ costs a single parse.
 We run NER only over the Spanish text block upstream, so a single Spanish model
 covers monolingual and co-official speeches alike.
 
+Two post-passes add the people the model misses, both leaving its own PER spans
+untouched and both excluded from ``entity_spans``: the gazetteer below, and role
+apposition (``_appositions``), which claims a name the text states an office for —
+"El ministro Albares", which the model returns as MISC. They are complementary by
+construction: the gazetteer covers surnames distinctive enough to tag anywhere but
+only if they are out of vocabulary, while apposition covers any surname, however
+common, where the role word makes that occurrence unambiguous.
+
 The optional gazetteer (distinctive deputy surnames) is applied as a
 ``PhraseMatcher`` post-pass over the parsed doc, NOT as an entity-ruler pipe: a
 match is added only when its tokens fall outside every model PER span. Placed
@@ -25,6 +33,7 @@ the model tags with the WRONG label ("El señor Feijóo" as MISC). The post-pass
 does both: model PER spans always win, and everything else is fair game.
 """
 
+from qhld_ai.domain.mentions import role_appositions
 from qhld_ai.domain.ports.ner import NerPort
 
 from .factory import _register
@@ -45,12 +54,23 @@ _COURTESY_WORDS = frozenset({
 # ones ("…con el señor Abascal"). Following the majority also drops an artifact, since no
 # article is part of anyone's name.
 _LEADING_ARTICLES = frozenset({"el", "la", "los", "las", "al", "del"})
+# Role words, for span SHAPE only: a span the model began at one starts at the name
+# instead ("ministro Torres" → "Torres"), for the same reason the article is trimmed — it
+# is nobody's name, and the span doubles as the site's highlight. The resolution-side
+# vocabulary is ``domain.mentions._ROLE_FAMILIES``, which is where the office a role word
+# states is actually used; this copy exists because shaping a span is not resolving it
+# (``_COURTESY_WORDS`` above is duplicated for the same reason).
+_ROLE_WORDS = frozenset({
+    "presidente", "presidenta", "vicepresidente", "vicepresidenta",
+    "ministro", "ministra",
+})
 
 
 class SpacyNer(NerPort):
-    def __init__(self, settings, gazetteer=None):
+    def __init__(self, settings, gazetteer=None, office_surfaces=None):
         self.settings = settings
         self._gazetteer = tuple(gazetteer or ())
+        self._office_surfaces = dict(office_surfaces or {})
         self._nlp = None
         self._matcher = None
         self._last = None  # (text, doc) memo — one entry, see _doc
@@ -94,6 +114,55 @@ class SpacyNer(NerPort):
         return [(start, end) for _, start, end in self._matcher(doc)
                 if not any(s < end and start < e for s, e in per)]
 
+    def _holds_office(self, name: str, family: str) -> bool:
+        """Whether some token of the apposed name belongs to a catalog office holder of
+        that same family. Deliberately a loose membership test, not a resolution: the
+        catalog decides what may be looked for, the resolver decides who was found (see
+        ``domain.mentions.build_office_surfaces``)."""
+        return any(family in self._office_surfaces.get(token, ())
+                   for token in name.lower().replace("-", " ").split()
+                   if len(token) >= 3)
+
+    def _appositions(self, doc) -> list[tuple[int, int]]:
+        """Names the text states an office for but the model did not tag as people: "El
+        ministro Albares" comes back as MISC, "Cuerpo" as ORG, "El señor Sánchez" as MISC.
+        They are person spans, so ``person_spans`` adds them and ``entity_spans`` excludes
+        them — the same contract, and the same overlap rule, as the gazetteer's
+        ``_rescued``: a model PER span always wins, everything else is fair game.
+
+        This is the half of role apposition the gazetteer cannot do. Its patterns only
+        cover surnames that are distinctive AND out of vocabulary, and every surname here
+        ("Sánchez", "Cuerpo", "Torres") is in vocabulary — a blunt rule on those would tag
+        every ordinary use of the word. The role word is what makes it safe: it is local
+        evidence that this occurrence names a person, so the office gate can be permissive
+        where the gazetteer must not be."""
+        if not self._office_surfaces:
+            return []
+        per = [(ent.start_char, ent.end_char) for ent in doc.ents if ent.label_ == "PER"]
+        bounds: list[tuple[int, int]] = []
+        for start, end, name, family in role_appositions(doc.text):
+            if any(s < end and start < e for s, e in per):
+                continue
+            if not self._holds_office(name, family):
+                continue
+            # expand: a capture can start mid-token when the text glues a name to a dash.
+            span = doc.char_span(start, end, alignment_mode="expand")
+            if span is not None and (span.start, span.end) not in bounds:
+                bounds.append((span.start, span.end))
+        return bounds
+
+    def _role_start(self, doc, start: int, end: int) -> int:
+        """``start`` moved past a leading role word, so the span holds the name alone:
+        "ministro Torres" → "Torres".
+
+        Only a LEADING one can go: "señor ministro Torres" keeps its courtesy form, which
+        carries the gender cue, and a role word in the middle of a span cannot be removed
+        without breaking it. A role-only span ("Ministra") is left alone here and drops out
+        later, when normalization finds no name in it."""
+        if end - start > 1 and doc[start].text.lower() in _ROLE_WORDS:
+            return start + 1
+        return start
+
     def _courtesy_start(self, doc, start: int, end: int) -> int:
         """``start`` moved so the span begins at its courtesy word, in either direction.
 
@@ -127,7 +196,9 @@ class SpacyNer(NerPort):
         doc = self._doc(text)
         bounds = [(ent.start, ent.end) for ent in doc.ents if ent.label_ == "PER"]
         bounds.extend(self._rescued(doc))
-        spans = [(start, end, doc[self._courtesy_start(doc, start, end):end].text)
+        bounds.extend(self._appositions(doc))
+        spans = [(start, end, doc[self._role_start(
+                     doc, self._courtesy_start(doc, start, end), end):end].text)
                  for start, end in bounds]
         spans.sort()
         return [span_text for _, _, span_text in spans]
@@ -136,11 +207,15 @@ class SpacyNer(NerPort):
         if not text:
             return []
         doc = self._doc(text)
-        rescued = self._rescued(doc)
+        # Both passes claim their spans for the person side, so neither can also be an
+        # entity: a surname the model mislabelled ("Cuerpo" as ORG, "El ministro Albares"
+        # as MISC) is a person, and leaving it in the entity index is what put bare
+        # surnames in the theme filter.
+        claimed = self._rescued(doc) + self._appositions(doc)
         gate = getattr(self.settings, "ner_entity_pos_gate", True)
         return [ent.text for ent in doc.ents
                 if ent.label_ != "PER"
-                and not any(s < ent.end and ent.start < e for s, e in rescued)
+                and not any(s < ent.end and ent.start < e for s, e in claimed)
                 and (not gate or self._is_entity_like(ent))]
 
     @staticmethod
@@ -155,5 +230,5 @@ class SpacyNer(NerPort):
 
 
 @_register("spacy")
-def create(settings, gazetteer=None) -> SpacyNer:
-    return SpacyNer(settings, gazetteer=gazetteer)
+def create(settings, gazetteer=None, office_surfaces=None) -> SpacyNer:
+    return SpacyNer(settings, gazetteer=gazetteer, office_surfaces=office_surfaces)
