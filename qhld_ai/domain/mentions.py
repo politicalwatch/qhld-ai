@@ -368,10 +368,11 @@ def build_surname_gazetteer(deputies, *, extra=()) -> list[str]:
 
 
 def normalize_span(span: str) -> str:
-    """Lowercase, drop punctuation and courtesy honorifics/articles. Returns the
-    residual name, or "" when nothing usable remains (e.g. "Su Señoría")."""
+    """Lowercase, drop punctuation, courtesy honorifics/articles and role words. Returns
+    the residual name, or "" when nothing usable remains ("Su Señoría", "Señora
+    ministra")."""
     cleaned = _PUNCT_RE.sub(" ", span.lower())
-    tokens = [t for t in cleaned.split() if t and t not in _HONORIFICS]
+    tokens = [t for t in cleaned.split() if t and t not in _STRIPPED]
     residual = " ".join(tokens)
     return residual if len(residual) >= _MIN_LEN else ""
 

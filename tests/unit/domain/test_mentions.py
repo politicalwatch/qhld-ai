@@ -13,6 +13,7 @@ import pytest
 from qhld_ai.domain.mentions import (
     COMMON_WORD_SURNAMES,
     build_deputy_index,
+    build_office_surfaces,
     build_person_index,
     build_surname_gazetteer,
     context_excluded_surnames,
@@ -22,6 +23,7 @@ from qhld_ai.domain.mentions import (
     office_families,
     resolve_mentions,
     resolve_person,
+    role_appositions,
     role_cues,
     span_gender,
 )
@@ -63,10 +65,23 @@ def test_normalize_strips_honorifics_and_articles():
     assert normalize_span("Al señor López") == "lópez"
 
 
+def test_normalize_strips_role_words_too():
+    # The model does fold a role word into a span, and the extra token dropped
+    # token_set_ratio to 71 against "Torres Pérez, Ángel Víctor" — below any workable
+    # threshold, so the mention was silently lost. Nothing is lost by stripping it: the
+    # office is read off the surrounding text (see role_cues), not off the span.
+    assert normalize_span("ministro Torres") == "torres"
+    assert normalize_span("el señor ministro Torres") == "torres"
+    assert normalize_span("la vicepresidenta Montero") == "montero"
+
+
 def test_normalize_drops_pure_honorific_and_too_short():
     assert normalize_span("Su Señoría") == ""
     assert normalize_span("el") == ""
     assert normalize_span(",.") == ""
+    # a role word with no name behind it names nobody
+    assert normalize_span("Señora ministra") == ""
+    assert normalize_span("Ministro") == ""
 
 
 # --- resolution ------------------------------------------------------------
@@ -832,3 +847,53 @@ def test_the_query_path_reads_no_office():
     assert resolve_person("Sánchez", SANCHEZ_INDEX, 90) is None
     assert match_person("Sánchez", SANCHEZ_INDEX, 90).candidate_names == [
         "Sánchez Pérez-Castejón, Pedro", "Sánchez Serna, Javier"]
+
+
+# --- role appositions as a detector seed ------------------------------------
+# The same three shapes serve two readers: a cue about a span that exists, and a span the
+# model never made. The offsets are what the second one needs.
+
+def test_role_appositions_carry_the_names_offsets_and_family():
+    text = "Lo dijo el presidente Sánchez ayer."
+    assert role_appositions(text) == [
+        (text.index("Sánchez"), text.index("Sánchez") + len("Sánchez"),
+         "Sánchez", "presidente")]
+
+
+def test_role_appositions_read_every_shape():
+    found = {(name, family) for _s, _e, name, family in role_appositions(
+        "El ministro Cuerpo y la ministra de Vivienda, Isabel Rodríguez, "
+        "hablaron con el señor Sánchez, presidente del Gobierno.")}
+    assert {("Cuerpo", "ministro"), ("Isabel Rodríguez", "ministro"),
+            ("Sánchez", "presidente")} <= found
+
+
+def test_role_appositions_are_ordered_by_position():
+    text = "El ministro Cuerpo respondió al presidente Sánchez."
+    offsets = [start for start, _e, _n, _f in role_appositions(text)]
+    assert offsets == sorted(offsets)
+
+
+def test_build_office_surfaces_maps_surnames_to_families():
+    index = [
+        make_person_entry("c", "minister", "Cuerpo Caballero, Carlos",
+                          offices=("ministro", "vicepresidente")),
+        make_person_entry("t", "minister", "Torres Pérez, Ángel Víctor",
+                          offices=("ministro",)),
+        make_person_entry("n", "minister", "Sin Cargo, Ana"),
+    ]
+    surfaces = build_office_surfaces(index)
+    assert surfaces["cuerpo"] == ("ministro", "vicepresidente")
+    assert surfaces["caballero"] == ("ministro", "vicepresidente")
+    assert surfaces["torres"] == ("ministro",)
+    # given names are not evidence ("el ministro Carlos" names nobody in particular)…
+    assert "carlos" not in surfaces
+    # …nor is a person with no recorded office
+    assert "sin" not in surfaces and "cargo" not in surfaces
+
+
+def test_build_office_surfaces_skips_surname_particles():
+    index = [make_person_entry("m", "minister", "Muñoz de la Iglesia, Ester",
+                               offices=("ministro",))]
+    surfaces = build_office_surfaces(index)
+    assert set(surfaces) == {"muñoz", "iglesia"}
