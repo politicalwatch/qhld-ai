@@ -608,6 +608,64 @@ def test_gender_never_overrides_an_unambiguous_full_name():
     assert _names(mentions) == {"Sánchez Pérez-Castejón, Pedro"}
 
 
+# --- the courtesy form as a veto -------------------------------------------
+# Narrowing can only choose between candidates. When the catalog holds exactly ONE bearer
+# of the surname there is nothing to choose from, and the contradicted person used to be
+# returned anyway — every such resolution in the corpus named somebody uncatalogued.
+
+CERCAS = build_deputy_index([FakeDeputy("c1", "Cercas Mena, Blanca", "Mujer")])
+
+
+def test_the_only_bearer_is_dropped_when_the_form_contradicts_them():
+    # "la opinión del señor Cercas" is the novelist, not the deputy Blanca Cercas.
+    assert resolve_mentions(["el señor Cercas"], CERCAS, 90) == []
+    # and the form that agrees still resolves
+    assert _names(resolve_mentions(["la señora Cercas"], CERCAS, 90)) == \
+        {"Cercas Mena, Blanca"}
+
+
+def test_the_veto_reaches_the_bare_occurrences_the_cue_is_pooled_over():
+    # Pooled like every other cue: one "señor Cercas" settles the bare ones in that
+    # speech, so the whole surname goes uncounted rather than half of it.
+    assert resolve_mentions(["el señor Cercas", "Cercas", "Cercas"], CERCAS, 90) == []
+
+
+def test_the_veto_spares_a_span_that_names_the_person():
+    # A span carrying their given name has identified them beyond doubt; there the
+    # courtesy form is a transcription oddity, not evidence.
+    assert _names(resolve_mentions(["el señor Blanca Cercas Mena"], CERCAS, 90)) == \
+        {"Cercas Mena, Blanca"}
+    assert _names(resolve_mentions(["doña Pedro Sánchez Pérez-Castejón"], INDEX, 90)) == \
+        {"Sánchez Pérez-Castejón, Pedro"}
+
+
+def test_an_unknown_catalog_gender_is_never_vetoed():
+    # Most bootstrapped speakers have none, and unknown is not a contradiction.
+    unknown = build_deputy_index([FakeDeputy("c2", "Cercas Mena, Blanca")])
+    assert _names(resolve_mentions(["el señor Cercas"], unknown, 90)) == \
+        {"Cercas Mena, Blanca"}
+
+
+def test_coreference_does_not_resurrect_a_vetoed_person():
+    # The interaction neither function shows on its own: coreference attaches a surface
+    # to the one tied person named elsewhere, and a vetoed surface must not qualify.
+    spans = ["Blanca Cercas Mena", "el señor Cercas", "Cercas"]
+    mentions = resolve_mentions(spans, CERCAS, 90)
+    # she is named in full, so she is still mentioned — but only for that one span
+    assert _counts(mentions) == {"Cercas Mena, Blanca": 1}
+
+
+def test_the_veto_can_be_switched_off():
+    assert _names(resolve_mentions(["el señor Cercas"], CERCAS, 90, gender_veto=False)) \
+        == {"Cercas Mena, Blanca"}
+
+
+def test_the_veto_needs_the_gate_to_have_pooled_a_cue():
+    # No gate, no cue to contradict — the setting pair cannot disagree into a drop.
+    assert _names(resolve_mentions(["el señor Cercas"], CERCAS, 90, gender_gate=False)) \
+        == {"Cercas Mena, Blanca"}
+
+
 def test_an_all_conflicting_tie_is_left_to_the_ambiguity_guard():
     # If the cue contradicts every candidate the data is wrong somewhere; keep dropping
     # rather than inventing a winner.

@@ -139,6 +139,16 @@ def _first_surname_tokens(name: str) -> set[str]:
     return _tokens(first)
 
 
+def _given_name_tokens(name: str) -> set[str]:
+    """The tokens of the given name — everything after the comma in "Apellidos, Nombre",
+    and nothing at all for a name written without one ("Felipe VI").
+
+    Used to tell a span that identifies somebody from one that merely shares their
+    surname, which is what decides whether a contradicting courtesy form is evidence or
+    noise (see ``_gender_vetoes``)."""
+    return _tokens(name.partition(",")[2])
+
+
 # Offices a sitting deputy would not simultaneously hold: when the text introduces a
 # person by one of these, the person named is not the deputy who happens to share the
 # surname. Scanned per speech so the exclusion is scoped to that speech (a cue anywhere
@@ -210,6 +220,26 @@ def _narrow_by_gender(cue: str | None, tied: list[PersonEntry]) -> list[PersonEn
     and let the ambiguity guard have the last word rather than inventing a winner."""
     kept = [e for e in tied if not _gender_conflicts(cue, e)]
     return kept if kept else tied
+
+
+def _gender_vetoes(cue: str | None, norm: str, entry: PersonEntry) -> bool:
+    """Whether the courtesy form rules out the person the tie-break chain ended on.
+
+    Narrowing (above) can only choose between candidates; when the catalog holds exactly
+    ONE bearer of the surname it has nothing to choose from and hands back the person the
+    form contradicts. That is how "el señor Marcos" became the deputy Milagros Marcos, "la
+    señora Caballero" the deputy Francisco Sierra Caballero, and "el señor Franco" a
+    deputy rather than the dictator. Measured over the corpus, every such resolution names
+    somebody outside the catalog, so the honest answer is to name nobody.
+
+    It fires only when the span identifies the person by SURNAME alone. A span carrying
+    their given name has already identified them beyond doubt ("doña Pedro Sánchez
+    Pérez-Castejón" is still the prime minister), so there the courtesy form is a
+    transcription oddity rather than evidence — the same reasoning that keeps a bare given
+    name out of ``_names_a_surname``, in the other direction."""
+    if not _gender_conflicts(cue, entry):
+        return False
+    return not (_tokens(norm) & _given_name_tokens(entry.name))
 
 
 def _narrow_by_office(cue: str, tied: list[PersonEntry]) -> list[PersonEntry]:
@@ -477,12 +507,14 @@ def match_person(name: str, index: list[PersonEntry], threshold: int) -> PersonM
 
 
 def _match_one(norm: str, index: list[PersonEntry], threshold: int,
-               gender=None, office=None) -> PersonMatch:
+               gender=None, office=None, gender_veto: bool = True) -> PersonMatch:
     """``gender`` is the courtesy form's gender read off the RAW span (see
     ``span_gender``), which ``norm`` has already had stripped. ``office`` is the role
-    family the speech appositions this surface with (see ``role_cues``). Both only ever
-    narrow an ambiguous tie, so passing ``None`` — as every query-side caller does —
-    leaves the outcome exactly as it was before either cue existed."""
+    family the speech appositions this surface with (see ``role_cues``). Both narrow an
+    ambiguous tie, and the gender cue can additionally VETO the person the narrowing ended
+    on (``gender_veto``, see ``_gender_vetoes``). Passing no ``gender`` — as every
+    query-side caller does — leaves the outcome exactly as it was before either cue
+    existed, veto included."""
     best_score = 0
     tied: list[PersonEntry] = []
     for entry in index:
@@ -529,6 +561,11 @@ def _match_one(norm: str, index: list[PersonEntry], threshold: int,
     if len(tied) > 1:
         tied = _break_tie(norm, tied)
     if len(tied) == 1:
+        if gender_veto and _gender_vetoes(gender, norm, tied[0]):
+            # Returned as a ONE-element candidate list on purpose: same-speech
+            # coreference attaches a surface only when two or more people are still tied
+            # for it, so a vetoed person cannot come back through it.
+            return PersonMatch(None, best_score, tied)
         return PersonMatch(tied[0], best_score)
     return PersonMatch(None, best_score, tied)
 
@@ -680,7 +717,7 @@ def _coreferents(matches: dict[str, PersonMatch], threshold: int) -> dict[str, P
 def resolve_mentions(
     spans, index: list[PersonEntry], threshold: int,
     excluded_surnames: frozenset[str] = frozenset(), *,
-    gender_gate: bool = True, coreference: bool = True,
+    gender_gate: bool = True, gender_veto: bool = True, coreference: bool = True,
     text: str | None = None, role_apposition: bool = True) -> list[Mention]:
     """Collapse raw NER ``spans`` (duplicates preserved) into canonical ``Mention``s.
 
@@ -694,7 +731,10 @@ def resolve_mentions(
     Three signals need the whole speech rather than one span, which is why the spans are
     matched first and counted second. ``gender_gate`` lets a gendered courtesy form
     settle a surname the ambiguity guard would otherwise drop ("la señora Muñoz" is the
-    female Muñoz). ``role_apposition`` lets the office a speech names somebody by settle
+    female Muñoz), and ``gender_veto`` lets the same form rule out the only bearer of a
+    surname when it contradicts them ("el señor Marcos" is not the deputy Milagros
+    Marcos); the veto needs the gate, since without pooled cues there is nothing to
+    contradict. ``role_apposition`` lets the office a speech names somebody by settle
     one too ("el presidente Sánchez"); it is the only signal that needs the speech
     ``text``, because the role word falls outside the span, and stays inert without it.
     ``coreference`` then attaches the surnames still tied to the one tied person the
@@ -708,7 +748,7 @@ def resolve_mentions(
         norm = normalize_span(span)
         if norm and norm not in matches:
             matches[norm] = _match_one(norm, index, threshold, gender=cues.get(norm),
-                                       office=offices.get(norm))
+                                       office=offices.get(norm), gender_veto=gender_veto)
     coreferents = _coreferents(matches, threshold) if coreference else {}
 
     by_person: dict[str, dict] = {}

@@ -132,6 +132,13 @@ class Settings(BaseSettings):
     # pooled per speech, so one such form settles every bare occurrence of that surname in
     # it. Off => shared surnames are dropped unless a fuller form disambiguates them.
     mention_gender_gate: bool = True
+    # Let the same courtesy form RULE OUT the only catalog bearer of a surname when it
+    # contradicts them: "el señor Marcos" is not the deputy Milagros Marcos, "el señor
+    # Franco" is the dictator. Narrowing alone cannot do this — with a single candidate
+    # there is nothing to choose between — and measured over the corpus every such
+    # resolution names somebody outside the catalog. Off => the contradicted person is
+    # returned, as before.
+    mention_gender_veto: bool = True
     # Attach a surname that stayed ambiguous to the one tied person the same speech names
     # elsewhere by a fuller form. It never introduces a person the speech does not
     # already name — it only stops their remaining occurrences going uncounted. Off =>
