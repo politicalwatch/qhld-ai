@@ -35,6 +35,36 @@ _DENSE = "dense"
 _SPARSE = "sparse"
 
 
+def _turbo(bits) -> models.TurboQuantization:
+    return models.TurboQuantization(
+        turbo=models.TurboQuantQuantizationConfig(bits=bits, always_ram=True))
+
+
+def _binary(encoding) -> models.BinaryQuantization:
+    return models.BinaryQuantization(
+        binary=models.BinaryQuantizationConfig(encoding=encoding, always_ram=True))
+
+
+# Vector compression presets, keyed by the ``qdrant_quantization`` setting: the
+# scheme and the bits per dimension it leaves. Every one pins its compressed
+# copy in RAM, which is what makes the copy worth keeping — the originals go to
+# disk instead (see ``_dense_params``). Below 4 bits the shortlist is coarse
+# enough that it needs re-scoring against the originals to be worth serving, so
+# those presets are only usable with ``qdrant_quantization_rescore``.
+_QUANTIZATION = {
+    "sq8": models.ScalarQuantization(
+        scalar=models.ScalarQuantizationConfig(
+            type=models.ScalarType.INT8, always_ram=True)),
+    "tq4": _turbo(models.TurboQuantBitSize.BITS4),
+    "tq2": _turbo(models.TurboQuantBitSize.BITS2),
+    "tq1_5": _turbo(models.TurboQuantBitSize.BITS1_5),
+    "tq1": _turbo(models.TurboQuantBitSize.BITS1),
+    "bq2": _binary(models.BinaryQuantizationEncoding.TWO_BITS),
+    "bq1_5": _binary(models.BinaryQuantizationEncoding.ONE_AND_HALF_BITS),
+    "bq1": _binary(models.BinaryQuantizationEncoding.ONE_BIT),
+}
+
+
 class QdrantAdapter(VectorStorePort):
     _MAX_ATTEMPTS = 4
     _BACKOFF_SECONDS = 0.5
@@ -51,6 +81,22 @@ class QdrantAdapter(VectorStorePort):
             )
         self._prefetch_limit = settings.hybrid_prefetch_limit
         self._fusion = models.Fusion(settings.hybrid_fusion.lower())
+        self._hnsw_ef = settings.qdrant_hnsw_ef
+        self._quantization = self._quantization_config(settings.qdrant_quantization)
+        self._rescore = settings.qdrant_quantization_rescore
+
+    @staticmethod
+    def _quantization_config(name: str):
+        """Resolve the configured compression preset. An unknown name fails here
+        rather than silently indexing uncompressed vectors."""
+        name = (name or "none").lower()
+        if name == "none":
+            return None
+        if name not in _QUANTIZATION:
+            raise ValueError(
+                f"Unknown qdrant_quantization {name!r}; "
+                f"expected 'none' or one of {sorted(_QUANTIZATION)}")
+        return _QUANTIZATION[name]
 
     def _retry(self, operation):
         """Run a Qdrant client call, retrying transient connection drops (stale
@@ -69,6 +115,8 @@ class QdrantAdapter(VectorStorePort):
     def ensure_collection(self, name: str, dim: int, sparse: bool = False) -> None:
         def _ensure():
             if self.client.collection_exists(name):
+                # Compression and layout are fixed at creation, so an existing
+                # collection keeps whatever shape it was built with.
                 return
             if sparse:
                 # Hybrid collection: a named dense vector plus a named sparse
@@ -77,10 +125,7 @@ class QdrantAdapter(VectorStorePort):
                 # corpus-independent term weights.
                 self.client.create_collection(
                     collection_name=name,
-                    vectors_config={
-                        _DENSE: models.VectorParams(
-                            size=dim, distance=models.Distance.COSINE),
-                    },
+                    vectors_config={_DENSE: self._dense_params(dim)},
                     sparse_vectors_config={
                         _SPARSE: models.SparseVectorParams(
                             modifier=models.Modifier.IDF),
@@ -89,10 +134,23 @@ class QdrantAdapter(VectorStorePort):
             else:
                 self.client.create_collection(
                     collection_name=name,
-                    vectors_config=models.VectorParams(
-                        size=dim, distance=models.Distance.COSINE),
+                    vectors_config=self._dense_params(dim),
                 )
         self._retry(_ensure)
+
+    def _dense_params(self, dim: int) -> models.VectorParams:
+        """Dense vector layout. Without compression this is Qdrant's default
+        arrangement. With it, the compressed copy is the one held in RAM and the
+        originals move to disk — keeping both resident would spend the memory the
+        compression just saved."""
+        if self._quantization is None:
+            return models.VectorParams(size=dim, distance=models.Distance.COSINE)
+        return models.VectorParams(
+            size=dim,
+            distance=models.Distance.COSINE,
+            quantization_config=self._quantization,
+            on_disk=True,
+        )
 
     def upsert(self, name: str, points: list[VectorPoint]) -> None:
         if not points:
@@ -177,6 +235,7 @@ class QdrantAdapter(VectorStorePort):
                 limit=limit,
                 group_size=group_size,
                 query_filter=query_filter,
+                search_params=self._search_params(),
                 with_payload=True,
             ))
         else:
@@ -218,6 +277,7 @@ class QdrantAdapter(VectorStorePort):
                 query=vector,
                 limit=k,
                 query_filter=query_filter,
+                search_params=self._search_params(),
                 with_payload=True,
             ))
         else:
@@ -243,15 +303,34 @@ class QdrantAdapter(VectorStorePort):
     ) -> list[models.Prefetch]:
         """Dense and sparse candidate branches for a fusion query. The payload
         filter goes on each branch: a top-level filter is not applied to
-        prefetched candidates under fusion, so it would be silently ignored."""
+        prefetched candidates under fusion, so it would be silently ignored.
+
+        Search parameters ride along the same way, and only on the dense branch:
+        they tune the vector-graph traversal, while a sparse branch matches an
+        inverted index exactly and has nothing to tune."""
         return [
             models.Prefetch(
-                query=vector, using=_DENSE, limit=fetch, filter=query_filter),
+                query=vector, using=_DENSE, limit=fetch, filter=query_filter,
+                params=self._search_params()),
             models.Prefetch(
                 query=models.SparseVector(
                     indices=sparse_vector.indices, values=sparse_vector.values),
                 using=_SPARSE, limit=fetch, filter=query_filter),
         ]
+
+    def _search_params(self) -> models.SearchParams | None:
+        """Per-query search tuning, or None when there is nothing to tune — which
+        leaves the server's own defaults in place, as before these were
+        configurable. Re-scoring only means anything against a compressed
+        collection, so it is sent only when one is configured."""
+        quantization = (
+            models.QuantizationSearchParams(rescore=self._rescore)
+            if self._quantization is not None and self._rescore is not None
+            else None
+        )
+        if self._hnsw_ef is None and quantization is None:
+            return None
+        return models.SearchParams(hnsw_ef=self._hnsw_ef, quantization=quantization)
 
     @classmethod
     def _build_conditions(cls, filters: dict | None) -> list[models.FieldCondition]:

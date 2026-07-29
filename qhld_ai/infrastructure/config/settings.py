@@ -36,6 +36,25 @@ class Settings(BaseSettings):
     # Empty -> the index/search services derive a per-model collection name
     # (speeches__<provider>__<model>__<dim>); set to force a fixed name.
     qdrant_collection: str = ""
+    # How many candidates the HNSW graph traversal keeps in flight per query. A
+    # wider beam visits more of the graph, so it returns more of what an exact
+    # search would, for a few milliseconds more; it is a search-time parameter,
+    # so changing it needs no re-index. None => send no search parameters at
+    # all, leaving Qdrant's own default beam.
+    qdrant_hnsw_ef: int | None = None
+    # Vector compression. "none" stores plain float32; any other value keeps a
+    # compressed copy of every vector in RAM ("sq8" = int8, "tq*" = TurboQuant
+    # and "bq*" = binary at the bit width in the name) and moves the originals
+    # to disk, which shrinks the resident footprint several-fold at some cost in
+    # recall. Compression is a property of the collection, fixed when it is
+    # created: changing this does not convert a collection that already exists.
+    qdrant_quantization: str = "none"
+    # Re-score the shortlist the compressed vectors produced against the
+    # original ones. It recovers most of the recall compression costs, but has
+    # to read the originals back from disk, which gives up much of the point of
+    # compressing. None => let Qdrant decide per collection. Only mild
+    # compression (4 bits and up) is worth serving without it.
+    qdrant_quantization_rescore: bool | None = None
 
     # Speech chunking (passage granularity for embeddings). Char-budgeted rather
     # than token-based so it stays provider/tokenizer-agnostic.

@@ -321,6 +321,134 @@ def test_hybrid_search_grouped_applies_filters_and_exclude(adapter):
     assert {g.speech_id for g in nxt} == {"B"}
 
 
+# --- Search tuning and vector compression ----------------------------------
+#
+# A beam width has no observable effect on the in-process store, so these tests
+# assert on the request the adapter builds rather than on the results it gets.
+# That is the only way to catch a parameter that is accepted and then ignored.
+
+def _tuned(**overrides):
+    return QdrantAdapter(Settings(_env_file=None, qdrant_host=":memory:", **overrides))
+
+
+def _spy(adapter, method):
+    """Capture the keyword arguments of a client call while still letting it run,
+    so the request is inspectable and the results stay real."""
+    captured = {}
+    original = getattr(adapter.client, method)
+
+    def recording(**kwargs):
+        captured.update(kwargs)
+        return original(**kwargs)
+
+    setattr(adapter.client, method, recording)
+    return captured
+
+
+def test_search_sends_the_configured_beam_width():
+    adapter = _tuned(qdrant_hnsw_ef=512)
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [_point({"speech_id": "A"})])
+    captured = _spy(adapter, "query_points")
+    assert len(adapter.search("c", [0.1, 0.2, 0.3], k=5)) == 1
+    assert captured["search_params"].hnsw_ef == 512
+
+
+def test_search_grouped_sends_the_configured_beam_width():
+    adapter = _tuned(qdrant_hnsw_ef=512)
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [_point({"speech_id": "A"})])
+    captured = _spy(adapter, "query_points_groups")
+    assert len(adapter.search_grouped(
+        "c", [0.1, 0.2, 0.3], group_by="speech_id", limit=10, group_size=3)) == 1
+    assert captured["search_params"].hnsw_ef == 512
+
+
+def test_hybrid_search_sends_the_beam_width_on_the_dense_branch_only():
+    # Regression guard, the same shape as the filter one above: under a fusion
+    # query top-level search parameters are not applied to the prefetched
+    # candidates, so they must ride on the branch that needs them — and only the
+    # dense branch traverses a vector graph.
+    adapter = _tuned(qdrant_hnsw_ef=512)
+    adapter.ensure_collection("h", 3, sparse=True)
+    adapter.upsert("h", [_hybrid_point({"speech_id": "a"}, [1.0, 0.0, 0.0], {7: 1.0})])
+    captured = _spy(adapter, "query_points")
+    hits = _query(adapter, {7: 1.0})
+    assert [h.payload["speech_id"] for h in hits] == ["a"]
+    dense, sparse = captured["prefetch"]
+    assert dense.params.hnsw_ef == 512
+    assert sparse.params is None
+    assert captured.get("search_params") is None
+
+
+def test_hybrid_search_grouped_sends_the_beam_width_on_the_dense_branch_only():
+    adapter = _tuned(qdrant_hnsw_ef=512)
+    adapter.ensure_collection("h", 3, sparse=True)
+    adapter.upsert("h", [_hybrid_point({"speech_id": "A"}, [1.0, 0.0, 0.0], {7: 1.0})])
+    captured = _spy(adapter, "query_points_groups")
+    groups = adapter.search_grouped(
+        "h", [1.0, 0.0, 0.0], group_by="speech_id", limit=10, group_size=1,
+        sparse_vector=SparseVector(indices=[7], values=[1.0]))
+    assert [g.speech_id for g in groups] == ["A"]
+    dense, sparse = captured["prefetch"]
+    assert dense.params.hnsw_ef == 512
+    assert sparse.params is None
+
+
+def test_search_sends_no_parameters_when_nothing_is_tuned(adapter):
+    # Unset means the server's own defaults, exactly as before these were
+    # configurable.
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [_point({"speech_id": "A"})])
+    captured = _spy(adapter, "query_points")
+    adapter.search("c", [0.1, 0.2, 0.3], k=5)
+    assert captured["search_params"] is None
+    assert adapter._search_params() is None
+
+
+def test_hybrid_search_sends_no_branch_parameters_when_nothing_is_tuned(adapter):
+    adapter.ensure_collection("h", 3, sparse=True)
+    adapter.upsert("h", [_hybrid_point({"speech_id": "a"}, [1.0, 0.0, 0.0], {7: 1.0})])
+    captured = _spy(adapter, "query_points")
+    _query(adapter, {7: 1.0})
+    assert all(branch.params is None for branch in captured["prefetch"])
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+@pytest.mark.parametrize("name", sorted(qdrant_mod._QUANTIZATION))
+def test_ensure_collection_applies_the_configured_compression(name, sparse):
+    adapter = _tuned(qdrant_quantization=name)
+    adapter.ensure_collection("c", 3, sparse=sparse)
+    vectors = adapter.client.get_collection("c").config.params.vectors
+    dense = vectors["dense"] if sparse else vectors
+    assert dense.quantization_config == qdrant_mod._QUANTIZATION[name]
+    # The compressed copy is the resident one, so the originals go to disk.
+    assert dense.on_disk is True
+
+
+def test_ensure_collection_stores_plain_vectors_by_default(adapter):
+    adapter.ensure_collection("c", 3)
+    dense = adapter.client.get_collection("c").config.params.vectors
+    assert dense.quantization_config is None
+    assert dense.on_disk is None
+
+
+def test_unknown_compression_name_fails_fast():
+    with pytest.raises(ValueError, match="tq3"):
+        _tuned(qdrant_quantization="tq3")
+
+
+def test_rescore_is_sent_only_against_a_compressed_collection():
+    # Nothing to re-score without compression, whatever the setting says.
+    assert _tuned(qdrant_quantization_rescore=False)._search_params() is None
+    # Compression alone leaves the choice to Qdrant.
+    assert _tuned(qdrant_quantization="tq4")._search_params() is None
+    params = _tuned(
+        qdrant_quantization="tq4", qdrant_quantization_rescore=False)._search_params()
+    assert params.quantization.rescore is False
+    assert params.hnsw_ef is None
+
+
 def test_retry_recovers_after_transient_disconnect(adapter, monkeypatch):
     monkeypatch.setattr(qdrant_mod.time, "sleep", lambda *_: None)
     calls = {"n": 0}
