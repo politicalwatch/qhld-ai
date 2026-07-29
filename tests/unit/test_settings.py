@@ -72,3 +72,28 @@ def test_ints_coerced_from_strings():
 def test_llm_temperature_coerced_to_float():
     settings = Settings(_env_file=None, llm_temperature="0.2")
     assert settings.llm_temperature == 0.2
+
+
+def test_retrieval_tuning_defaults_to_no_opinion(monkeypatch):
+    for key in ("QDRANT_HNSW_EF", "QDRANT_QUANTIZATION", "QDRANT_QUANTIZATION_RESCORE"):
+        monkeypatch.delenv(key, raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.qdrant_hnsw_ef is None
+    assert settings.qdrant_quantization == "none"
+    assert settings.qdrant_quantization_rescore is None
+
+
+def test_blank_retrieval_tuning_values_mean_unset():
+    # "VAR=" is how an env file says "leave this to the server"; it must not be a
+    # startup error.
+    settings = Settings(
+        _env_file=None, qdrant_hnsw_ef="", qdrant_quantization_rescore="")
+    assert settings.qdrant_hnsw_ef is None
+    assert settings.qdrant_quantization_rescore is None
+
+
+def test_retrieval_tuning_coerced_from_strings():
+    settings = Settings(
+        _env_file=None, qdrant_hnsw_ef="1024", qdrant_quantization_rescore="false")
+    assert settings.qdrant_hnsw_ef == 1024
+    assert settings.qdrant_quantization_rescore is False

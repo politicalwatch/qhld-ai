@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,6 +56,14 @@ class Settings(BaseSettings):
     # compressing. None => let Qdrant decide per collection. Only mild
     # compression (4 bits and up) is worth serving without it.
     qdrant_quantization_rescore: bool | None = None
+
+    @field_validator("qdrant_hnsw_ef", "qdrant_quantization_rescore", mode="before")
+    @classmethod
+    def _blank_leaves_it_to_the_server(cls, value):
+        """``VAR=`` in an env file reads as "no opinion on this", which is what
+        None means for these two. Without this it would fail to parse instead,
+        making the empty form a startup error rather than a way to opt out."""
+        return None if value == "" else value
 
     # Speech chunking (passage granularity for embeddings). Char-budgeted rather
     # than token-based so it stays provider/tokenizer-agnostic.
