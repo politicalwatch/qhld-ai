@@ -47,5 +47,5 @@ def _register_available(package: str, modules: tuple[str, ...]) -> None:
 
 _register_available(
     "qhld_ai.infrastructure.embeddings",
-    ("openai", "google", "ollama", "vmlx", "novita"),
+    ("openai", "google", "ollama", "vmlx", "novita", "digitalocean"),
 )

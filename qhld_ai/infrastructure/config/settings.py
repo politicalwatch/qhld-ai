@@ -92,14 +92,16 @@ class Settings(BaseSettings):
     # http://127.0.0.1:11438/v1/rerank). Local servers are unauthenticated —
     # hosted vendors get dedicated providers with their own keys below.
     reranker_base_url: str = ""
-    # Hosted-vendor providers ("jina", "cohere", "voyage", "novita")
-    # authenticate with per-vendor keys so several vendors can coexist in one
-    # .env. The cohere and voyage SDKs also read their own env vars
-    # (COHERE_API_KEY / VOYAGE_API_KEY) when the setting is empty.
+    # Hosted-vendor providers ("jina", "cohere", "voyage", "novita",
+    # "digitalocean") authenticate with per-vendor keys so several vendors can
+    # coexist in one .env — which is what lets one stand in for another when a
+    # vendor is unavailable. The cohere and voyage SDKs also read their own env
+    # vars (COHERE_API_KEY / VOYAGE_API_KEY) when the setting is empty.
     jina_api_key: str = ""
     cohere_api_key: str = ""
     voyage_api_key: str = ""
     novita_api_key: str = ""
+    digitalocean_api_key: str = ""
     # Relevance floor on the reranked score: results below it are dropped, so an
     # off-domain or nonsensical query returns nothing rather than the top-k
     # least-irrelevant passages (bi-encoder cosine / RRF scores don't separate

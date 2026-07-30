@@ -5,6 +5,7 @@ import pytest
 from qhld_ai.infrastructure.config.settings import Settings
 from qhld_ai.infrastructure.reranker.cohere import CohereReranker
 from qhld_ai.infrastructure.reranker.cross_encoder import CrossEncoderReranker
+from qhld_ai.infrastructure.reranker.digitalocean import DigitalOceanReranker
 from qhld_ai.infrastructure.reranker.factory import create_reranker_from_env
 from qhld_ai.infrastructure.reranker.jina import JinaReranker
 from qhld_ai.infrastructure.reranker.noop import NoOpReranker
@@ -94,6 +95,19 @@ def test_voyage_provider_builds_voyage_reranker():
     reranker = create_reranker_from_env(settings)
     assert isinstance(reranker, VoyageReranker)
     assert reranker._model == "rerank-2.5"
+    assert reranker._client is None    # constructing it does not open connections
+
+
+def test_digitalocean_provider_builds_digitalocean_reranker():
+    settings = _settings(
+        reranker_provider="digitalocean",
+        reranker_model="bge-reranker-v2-m3",
+        digitalocean_api_key="secret",
+    )
+    reranker = create_reranker_from_env(settings)
+    assert isinstance(reranker, DigitalOceanReranker)
+    assert reranker._model == "bge-reranker-v2-m3"
+    assert reranker._api_key == "secret"
     assert reranker._client is None    # constructing it does not open connections
 
 
