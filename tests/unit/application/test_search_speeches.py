@@ -411,3 +411,116 @@ def test_search_grouped_keeps_one_language_per_card():
     groups = service.search_grouped("q", page_size=5, highlights=3)
 
     assert [h.id for h in groups[0].highlights] == ["es1"]   # matched lang wins; ca twin dropped
+
+
+# --- Grouped top-up: cards must show what the detail page would --------------
+
+def _passage(id_, speech_id, score=0.5):
+    return SearchHit(id=id_, score=score,
+                     payload={"text": id_, "lang": "es", "speech_id": speech_id})
+
+
+class _SaturatedStore:
+    """Grouped retrieval returns a FULL pool (group_size passages) for speech A,
+    so more of its passages may exist; the scoped search reveals two more."""
+
+    def __init__(self, pool_size=5):
+        self.pool_size = pool_size
+        self.searches = []
+
+    def search_grouped(self, name, vector, group_by, limit, group_size,
+                       filters=None, exclude=None):
+        pooled = [_passage(f"a{i}", "A") for i in range(1, group_size + 1)]
+        return [SpeechGroup(speech_id="A", score=0.5, highlights=pooled)]
+
+    def search(self, name, vector, k, filters=None):
+        self.searches.append((k, filters))
+        return ([_passage(f"a{i}", "A") for i in range(1, self.pool_size + 1)]
+                + [_passage("a90", "A"), _passage("a91", "A")])
+
+
+class _CountingReranker:
+    """Scores by id, recording every batch it was asked to score."""
+
+    def __init__(self, scores):
+        self.scores = scores
+        self.batches = []
+
+    def rerank(self, query, hits, k):
+        self.batches.append([h.id for h in hits])
+        rescored = [SearchHit(id=h.id, score=self.scores.get(h.id, 0.0), payload=h.payload)
+                    for h in hits]
+        rescored.sort(key=lambda hit: hit.score, reverse=True)
+        return rescored[:k]
+
+
+def test_deficient_card_is_refilled_from_the_rest_of_its_speech():
+    # Only a1 clears the floor in the pooled passages, so the card shows 1 of 3 —
+    # but the speech has two more above-floor passages the pool never returned.
+    store = _SaturatedStore()
+    reranker = _CountingReranker(
+        {"a1": 0.9, "a2": 0.05, "a3": 0.05, "a4": 0.05, "a5": 0.05,
+         "a90": 0.8, "a91": 0.7})
+    service = SearchSpeeches(settings=_settings(reranker_score_floor=0.15),
+                             embedder=_FakeEmbedder(), store=store, reranker=reranker)
+
+    groups = service.search_grouped("q", page_size=5, highlights=3)
+
+    assert [h.id for h in groups[0].highlights] == ["a1", "a90", "a91"]
+    assert store.searches[0][1] == {"speech_id": ["A"]}   # one scoped retrieval
+    # the already-scored passages are never sent to the reranker a second time
+    assert reranker.batches[1] == ["a90", "a91"]
+
+
+def test_unsaturated_pool_is_never_topped_up():
+    # The pool came back SHORT of group_size, so every passage of the speech was
+    # already scored: a card with one survivor is genuinely all there is.
+    class _Store:
+        def __init__(self):
+            self.searches = []
+
+        def search_grouped(self, name, vector, group_by, limit, group_size,
+                           filters=None, exclude=None):
+            return [SpeechGroup(speech_id="A", score=0.5,
+                                highlights=[_passage("a1", "A"), _passage("a2", "A")])]
+
+        def search(self, name, vector, k, filters=None):  # pragma: no cover
+            raise AssertionError("no top-up retrieval expected")
+
+    service = SearchSpeeches(
+        settings=_settings(reranker_score_floor=0.15), embedder=_FakeEmbedder(),
+        store=_Store(), reranker=_ScoresById({"a1": 0.9, "a2": 0.05}))
+
+    groups = service.search_grouped("q", page_size=5, highlights=3)
+
+    assert [h.id for h in groups[0].highlights] == ["a1"]
+
+
+def test_full_card_costs_no_extra_call():
+    # Every slot already filled: the page is returned untouched, no second
+    # retrieval and no second rerank.
+    store = _SaturatedStore()
+    reranker = _CountingReranker({f"a{i}": 0.9 - i / 100 for i in range(1, 6)})
+    service = SearchSpeeches(settings=_settings(reranker_score_floor=0.15),
+                             embedder=_FakeEmbedder(), store=store, reranker=reranker)
+
+    groups = service.search_grouped("q", page_size=5, highlights=3)
+
+    assert [h.id for h in groups[0].highlights] == ["a1", "a2", "a3"]
+    assert store.searches == []          # no scoped retrieval
+    assert len(reranker.batches) == 1    # no second rerank
+
+
+def test_top_up_keeps_the_query_filters():
+    # The scoped retrieval carries the query's own filters alongside speech_id;
+    # the speeches already satisfy them, and dropping them could widen the match.
+    store = _SaturatedStore()
+    reranker = _CountingReranker(
+        {"a1": 0.9, "a2": 0.05, "a3": 0.05, "a4": 0.05, "a5": 0.05,
+         "a90": 0.8, "a91": 0.7})
+    service = SearchSpeeches(settings=_settings(reranker_score_floor=0.15),
+                             embedder=_FakeEmbedder(), store=store, reranker=reranker)
+
+    service.search_grouped("q", page_size=5, highlights=3, filters={"group": "GS"})
+
+    assert store.searches[0][1] == {"group": "GS", "speech_id": ["A"]}

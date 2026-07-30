@@ -15,6 +15,10 @@ from qhld_ai.infrastructure.embeddings.factory import create_embedder_from_env
 from qhld_ai.infrastructure.vectorstore.factory import create_vector_store_from_env
 from qhld_ai.infrastructure.vectorstore.naming import collection_name
 
+# Retrieval ceiling for the grouped path's top-up: a speech_id filter narrows the
+# candidates to a handful of speeches, so this only means "return all of them".
+_TOPUP_K = 1000
+
 
 def _drop_vectors(inputs: dict) -> dict:
     """Keep traced retrieval inputs readable: the query vectors are hundreds of
@@ -145,12 +149,13 @@ class SearchSpeeches:
         # of one per group. Each group is then rebuilt from its own reranked
         # highlights: drop below-floor passages, keep one language, group score =
         # best surviving highlight, re-sort, trim.
+        pool_size = max(highlights, 5)
         groups = self._store_search_grouped(
             collection,
             vector,
             group_by="speech_id",
             limit=page_size * 2,
-            group_size=max(highlights, 5),
+            group_size=pool_size,
             filters=clean or None,
             exclude=exclude,
             **extra,
@@ -158,37 +163,102 @@ class SearchSpeeches:
         pooled = [hit for group in groups for hit in group.highlights]
         rescored = self._rerank(query, pooled, len(pooled),
                                 langsmith_extra=self._rerank_metadata())
-        # Floor the passages themselves (same gate the ungrouped path applies),
-        # so a card never shows a below-floor snippet the detail page then drops.
-        # A speech qualifies iff it keeps at least one passage — equivalent to the
-        # old "best passage ≥ floor" group gate, so the result set is unchanged.
-        surviving = self._above_floor(rescored, apply_floor)
-        scores = {hit.id: hit.score for hit in surviving}
-        reranked = []
-        for group in groups:
-            ranked = sorted(
-                (SearchHit(id=hit.id, score=scores[hit.id], payload=hit.payload)
-                 for hit in group.highlights if hit.id in scores),
-                key=lambda hit: hit.score, reverse=True,
-            )
-            if not ranked:
-                continue
-            # One language per card (no original/translation twins of the same
-            # passage): keep the matched language — the top-scoring survivor's lang,
-            # which is the query's language for a same-language corpus hit — with
-            # Spanish as the fallback, then whatever remains. Done BEFORE the top-N
-            # trim so twins never consume card slots.
-            matched = ranked[0].payload.get("lang")
-            same = (
-                [hit for hit in ranked if hit.payload.get("lang") == matched]
-                or [hit for hit in ranked if hit.payload.get("lang") == "es"]
-                or ranked
-            )
-            top = same[:highlights]
-            reranked.append(
-                SpeechGroup(speech_id=group.speech_id, score=top[0].score, highlights=top))
+        # Every score is kept, below-floor ones included: the floor is applied per
+        # group in _build_group, and the top-up below reads this map to know which
+        # passages were already scored so none is ever paid for twice.
+        scored = {hit.id: hit.score for hit in rescored}
+        reranked = [
+            group for group in (
+                self._build_group(source.speech_id, source.highlights, scored,
+                                  highlights, apply_floor)
+                for source in groups
+            ) if group is not None
+        ]
         reranked.sort(key=lambda group: group.score, reverse=True)
-        return reranked[:page_size]
+        page = reranked[:page_size]
+        page = self._top_up(
+            query, collection, vector, clean, extra, page,
+            {source.speech_id: len(source.highlights) for source in groups},
+            pool_size, highlights, apply_floor, scored)
+        page.sort(key=lambda group: group.score, reverse=True)
+        return page
+
+    def _build_group(self, speech_id, hits, scored, highlights, apply_floor):
+        """One speech's card, built from its scored passages — or ``None`` when the
+        speech keeps nothing.
+
+        Floors the passages themselves (the same gate the ungrouped path applies),
+        so a card never shows a below-floor snippet the detail page then drops. A
+        speech qualifies iff it keeps at least one passage, which is equivalent to
+        the older "best passage ≥ floor" group gate.
+        """
+        ranked = sorted(
+            (SearchHit(id=hit.id, score=scored[hit.id], payload=hit.payload)
+             for hit in hits if hit.id in scored),
+            key=lambda hit: hit.score, reverse=True,
+        )
+        ranked = self._above_floor(ranked, apply_floor)
+        if not ranked:
+            return None
+        # One language per card (no original/translation twins of the same
+        # passage): keep the matched language — the top-scoring survivor's lang,
+        # which is the query's language for a same-language corpus hit — with
+        # Spanish as the fallback, then whatever remains. Done BEFORE the top-N
+        # trim so twins never consume card slots.
+        matched = ranked[0].payload.get("lang")
+        same = (
+            [hit for hit in ranked if hit.payload.get("lang") == matched]
+            or [hit for hit in ranked if hit.payload.get("lang") == "es"]
+            or ranked
+        )
+        top = same[:highlights]
+        return SpeechGroup(speech_id=speech_id, score=top[0].score, highlights=top)
+
+    def _top_up(self, query, collection, vector, filters, extra, page, pool_sizes,
+                pool_size, highlights, apply_floor, scored):
+        """Refill cards showing fewer passages than their speech actually offers.
+
+        Grouped retrieval returns at most ``pool_size`` passages per speech, so a
+        passage the bi-encoder ranked below that but the reranker scores above the
+        floor reaches the detail page — which scores ALL of a speech's passages —
+        and never the card. Cards short of ``highlights`` are refilled here from
+        the rest of their own speech, costing one extra retrieval and one extra
+        rerank for the whole page, both reusing the query vectors already computed.
+
+        A card whose pool came back short of ``pool_size`` is skipped: every
+        passage of that speech was already scored, so nothing can be missing.
+        Only the page's own cards are refilled — a speech that never made the page
+        keeps the score its pooled passages earned. Refilling those too would mean
+        reranking every candidate speech in full, which costs several times more
+        and is still not exact for the longest speeches.
+        """
+        deficient = [group for group in page
+                     if len(group.highlights) < highlights
+                     and pool_sizes.get(group.speech_id) == pool_size]
+        if not deficient:
+            return page
+        speech_ids = [group.speech_id for group in deficient]
+        # k is a ceiling the store API requires, not a passage cap: the speech_id
+        # filter narrows candidates to these speeches' own passages.
+        hits = self._store_search(
+            collection, vector, _TOPUP_K, {**filters, "speech_id": speech_ids}, **extra)
+        fresh = [hit for hit in hits if hit.id not in scored]
+        if not fresh:
+            return page
+        rescored = self._rerank(query, fresh, len(fresh),
+                                langsmith_extra=self._rerank_metadata())
+        scored = {**scored, **{hit.id: hit.score for hit in rescored}}
+        passages = {}
+        for hit in hits:
+            passages.setdefault(hit.payload.get("speech_id"), []).append(hit)
+        refilled = {}
+        for group in deficient:
+            rebuilt = self._build_group(
+                group.speech_id, passages.get(group.speech_id, []), scored,
+                highlights, apply_floor)
+            if rebuilt is not None:
+                refilled[group.speech_id] = rebuilt
+        return [refilled.get(group.speech_id, group) for group in page]
 
     def _above_floor(self, items, apply_floor):
         """Drop reranked hits/groups scoring below the relevance floor. Only the
