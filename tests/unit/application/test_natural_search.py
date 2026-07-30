@@ -47,6 +47,16 @@ class _SpySearch:
         self.floors.append(apply_floor)
         return ["group"]
 
+    # The browse pair takes no query and no floor — nothing is being ranked.
+
+    def browse(self, k=10, filters=None):
+        self.calls.append(("browse", k, filters))
+        return ["browsed"]
+
+    def browse_grouped(self, page_size=10, excerpts=1, filters=None, exclude=None):
+        self.calls.append(("browse_grouped", page_size, excerpts, filters, exclude))
+        return ["browsed group"]
+
 
 def _service(parsed, resolution):
     return NaturalSearchSpeeches(
@@ -119,15 +129,40 @@ def test_no_filters_passes_none():
     assert service.search.calls[0][3] is None
 
 
-def test_pure_filter_query_falls_back_to_full_text():
+# --- Pure-filter queries browse, they don't search ----------------------------
+# No topic means nothing to rank passages by. Searching the raw query text
+# instead ranks the filtered set by resemblance to words no speech contains, and
+# then presents that arbitrary order as matches — the bug this path replaces.
+
+
+def test_pure_filter_query_browses_instead_of_searching():
     # No topic extracted (semantic_query empty) but a group filter present.
     parsed = ParsedQuery(semantic_query="", groups_or_parties=["PSOE"])
     resolution = Resolution(filters={"group": "GS"})
     service = _service(parsed, resolution)
-    service.execute("intervenciones del PSOE", today=date(2025, 7, 3))
-    _, query, _, filters = service.search.calls[0]
-    assert query == "intervenciones del PSOE"   # fallback so there's a vector to rank by
-    assert filters == {"group": "GS"}
+    result = service.execute("intervenciones del PSOE", today=date(2025, 7, 3), k=5)
+    kind, k, filters = service.search.calls[0]
+    assert kind == "browse"                     # never the searching path
+    assert (k, filters) == (5, {"group": "GS"})
+    assert result.browse is True
+    assert result.semantic_query == ""          # no topic is published as none
+    assert result.hits == ["browsed"]
+
+
+def test_grouped_pure_filter_query_browses_grouped():
+    parsed = ParsedQuery(semantic_query="", speakers=["Pedro Sánchez"])
+    resolution = Resolution(filters={"speaker": "Sánchez Pérez-Castejón, Pedro"})
+    service = _service(parsed, resolution)
+    result = service.execute("intervenciones de Pedro Sánchez", today=date(2025, 7, 3),
+                             k=8, grouped=True, highlights=3, exclude={"sp-1"})
+    kind, page_size, excerpts, filters, exclude = service.search.calls[0]
+    assert kind == "browse_grouped"
+    assert (page_size, filters, exclude) == (8, {"speaker": "Sánchez Pérez-Castejón, Pedro"},
+                                             {"sp-1"})
+    # A browsed card previews the speech; it shows no "matching" passages, so the
+    # highlights count the caller asked for does not apply.
+    assert excerpts == 1
+    assert result.browse is True
 
 
 def test_blocked_resolution_skips_retrieval():
@@ -167,10 +202,10 @@ def test_nonblocking_unresolved_still_searches():
 # --- Relevance-floor gating by query type ------------------------------------
 # The floor only means "off-domain" on topical queries. PURE-entity queries are
 # exempt (the semantic query is just the entity, so a valid brief-mention hit
-# reranks as low as junk), and so are pure-filter queries (they score against
-# fallback text). Everything else keeps the floor — a topic beyond the entity
-# ("sequía en Málaga") is a genuine requirement, and speaker/mention filters
-# never exempt since those persons are stripped out of the semantic query.
+# reranks as low as junk). Everything else keeps the floor — a topic beyond the
+# entity ("sequía en Málaga") is a genuine requirement, and speaker/mention
+# filters never exempt since those persons are stripped out of the semantic
+# query. A topic-less query has no floor to gate at all: it browses.
 
 
 def test_topical_query_applies_the_floor():
@@ -236,23 +271,15 @@ def test_mentioned_person_query_with_topic_still_applies_the_floor():
     assert service.search.floors == [True]
 
 
-def test_pure_mention_query_skips_the_floor_via_empty_topic():
-    # No residual topic: brief mentions are exactly what the user asked for.
+def test_pure_mention_query_browses_rather_than_floors():
+    # No residual topic — "every speech mentioning Zapatero" is a filter, so there
+    # is no relevance to floor and nothing to rank: browse.
     parsed = ParsedQuery(semantic_query="", mentioned_persons=["Zapatero"])
     resolution = Resolution(filters={"mentions": "dep-zapatero"})
     service = _service(parsed, resolution)
     service.execute("intervenciones que mencionen a Zapatero", today=date(2025, 7, 3))
-    assert service.search.floors == [False]
-
-
-def test_pure_filter_query_skips_the_floor():
-    # semantic_query empty → search text is the raw-query fallback, which corpus
-    # passages never resemble; a floor there would drop everything.
-    parsed = ParsedQuery(semantic_query="", groups_or_parties=["PSOE"])
-    resolution = Resolution(filters={"group": "GS"})
-    service = _service(parsed, resolution)
-    service.execute("intervenciones del PSOE", today=date(2025, 7, 3))
-    assert service.search.floors == [False]
+    assert service.search.calls[0][0] == "browse"
+    assert service.search.floors == []          # the floor never enters the picture
 
 
 def test_floor_gate_reaches_grouped_search_too():
@@ -277,10 +304,9 @@ def test_non_search_query_is_rejected():
 
 
 def test_empty_parse_is_rejected():
-    # The parser said "search" but extracted nothing — no topic, no filters.
-    # The pure-filter fallback would retrieve on the raw text with the floor
-    # skipped (gibberish that slips the is_speech_search gate lands here), so
-    # an empty parse is rejected like the gate would have.
+    # The parser said "search" but extracted nothing — no topic, no filters. There
+    # is nothing to search on and nothing to browse either (gibberish that slips
+    # the is_speech_search gate lands here), so it is rejected like the gate would.
     parsed = ParsedQuery(semantic_query="")
     service = _service(parsed, Resolution())
     with pytest.raises(NotASpeechQuery):
@@ -362,6 +388,20 @@ def test_passages_mirrors_the_floor_gate_pure_entity():
                      speech_id="sp-1")
     assert service.search.floors == [False]
     assert service.search.calls[0][3] == {"entities": "eurovision", "speech_id": "sp-1"}
+
+
+def test_passages_of_a_pure_filter_query_are_none():
+    # The detail page highlights what matched the query. A pure-filter query asked
+    # for no topic, so nothing in the speech matched and nothing may be marked —
+    # this is what kept the whole transcript lit up before.
+    parsed = ParsedQuery(semantic_query="", speakers=["Pedro Sánchez"])
+    resolution = Resolution(filters={"speaker": "Sánchez Pérez-Castejón, Pedro"})
+    service = _service(parsed, resolution)
+    result = service.passages("intervenciones de Pedro Sánchez", today=date(2025, 7, 3),
+                              speech_id="sp-1")
+    assert result.hits == []
+    assert result.browse is True
+    assert service.search.calls == []           # no retrieval at all
 
 
 def test_passages_blocked_resolution_skips_retrieval():

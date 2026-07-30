@@ -104,3 +104,39 @@ class VectorStorePort(Protocol):
         excluding seen ids); ``sparse_vector`` enables hybrid ranking as in
         ``search``."""
         ...
+
+    # Browse: the vector-free half of the port. A query with no topic (only
+    # filters — "intervenciones de Pedro Sánchez") has nothing to rank passages
+    # by, so it asks for the filtered set in payload order instead of pretending
+    # some text was searched for. Both methods return ``score`` 0.0: there is no
+    # relevance to report.
+
+    def browse(
+        self,
+        name: str,
+        filters: dict | None = None,
+        limit: int = 10,
+        order_key: str | None = "date",
+        descending: bool = True,
+    ) -> list[SearchHit]:
+        """Return up to ``limit`` filtered points ordered by payload
+        ``order_key`` (``None`` = whatever order the store keeps them in).
+        ``filters`` take the same form as in ``search``."""
+        ...
+
+    def browse_grouped(
+        self,
+        name: str,
+        group_by: str,
+        limit: int,
+        filters: dict | None = None,
+        exclude: set | None = None,
+        order_key: str = "date",
+        descending: bool = True,
+    ) -> list["SpeechGroup"]:
+        """Return the ``limit`` first distinct groups (by payload ``group_by``)
+        in payload ``order_key`` order, with EMPTY highlights: the passages a
+        card shows are the caller's choice, and every passage of a group shares
+        its ``order_key`` value, so the store cannot tell which of them to
+        return. ``filters`` and ``exclude`` behave as in ``search_grouped``."""
+        ...

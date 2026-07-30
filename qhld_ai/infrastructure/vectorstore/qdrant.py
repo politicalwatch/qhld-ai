@@ -45,6 +45,26 @@ def _binary(encoding) -> models.BinaryQuantization:
         binary=models.BinaryQuantizationConfig(encoding=encoding, always_ram=True))
 
 
+_PAYLOAD_INDEXES = {
+    # Range index: what a date-window filter narrows on, and what Qdrant demands
+    # before it will ``order_by`` a key at all (the browse path orders by date).
+    "date": models.PayloadSchemaType.INTEGER,
+    # Keyword indexes for every payload key a search filters on — the resolved
+    # NL-query filters plus ``speech_id``, which scopes the detail page's
+    # passages and the grouped path's top-up. Unindexed keys make Qdrant scan
+    # the whole collection per filtered query.
+    "speech_id": models.PayloadSchemaType.KEYWORD,
+    "speaker": models.PayloadSchemaType.KEYWORD,
+    "role": models.PayloadSchemaType.KEYWORD,
+    "group": models.PayloadSchemaType.KEYWORD,
+    "constituency": models.PayloadSchemaType.KEYWORD,
+    "mentions": models.PayloadSchemaType.KEYWORD,
+    "entities": models.PayloadSchemaType.KEYWORD,
+    "lang": models.PayloadSchemaType.KEYWORD,
+    "legislature": models.PayloadSchemaType.KEYWORD,
+}
+
+
 # Vector compression presets, keyed by the ``qdrant_quantization`` setting: the
 # scheme and the bits per dimension it leaves. Every one pins its compressed
 # copy in RAM, which is what makes the copy worth keeping — the originals go to
@@ -116,7 +136,10 @@ class QdrantAdapter(VectorStorePort):
         def _ensure():
             if self.client.collection_exists(name):
                 # Compression and layout are fixed at creation, so an existing
-                # collection keeps whatever shape it was built with.
+                # collection keeps whatever shape it was built with. Payload
+                # indexes are not: they are added below on every run, which is
+                # how a collection built before this existed acquires them.
+                self._ensure_payload_indexes(name)
                 return
             if sparse:
                 # Hybrid collection: a named dense vector plus a named sparse
@@ -136,7 +159,20 @@ class QdrantAdapter(VectorStorePort):
                     collection_name=name,
                     vectors_config=self._dense_params(dim),
                 )
+            self._ensure_payload_indexes(name)
         self._retry(_ensure)
+
+    def _ensure_payload_indexes(self, name: str) -> None:
+        """Index every payload key searches filter or order on. Re-creating an
+        index that already exists is a no-op server-side, so this can run on
+        every call; the in-process store ignores payload indexes altogether,
+        which is why it is not an error there either."""
+        existing = self.client.get_collection(name).payload_schema or {}
+        for key, schema in _PAYLOAD_INDEXES.items():
+            if key in existing:
+                continue
+            self.client.create_payload_index(
+                collection_name=name, field_name=key, field_schema=schema)
 
     def _dense_params(self, dim: int) -> models.VectorParams:
         """Dense vector layout. Without compression this is Qdrant's default
@@ -216,17 +252,7 @@ class QdrantAdapter(VectorStorePort):
         exclude: set | None = None,
         sparse_vector: SparseVector | None = None,
     ) -> list[SpeechGroup]:
-        must = self._build_conditions(filters)
-        must_not = (
-            [models.FieldCondition(key=group_by, match=models.MatchAny(any=list(exclude)))]
-            if exclude
-            else []
-        )
-        query_filter = (
-            models.Filter(must=must or None, must_not=must_not or None)
-            if (must or must_not)
-            else None
-        )
+        query_filter = self._query_filter(filters, exclude, group_by)
         if sparse_vector is None:
             response = self._retry(lambda: self.client.query_points_groups(
                 collection_name=name,
@@ -269,8 +295,7 @@ class QdrantAdapter(VectorStorePort):
         filters: dict | None = None,
         sparse_vector: SparseVector | None = None,
     ) -> list[SearchHit]:
-        must = self._build_conditions(filters)
-        query_filter = models.Filter(must=must) if must else None
+        query_filter = self._query_filter(filters)
         if sparse_vector is None:
             response = self._retry(lambda: self.client.query_points(
                 collection_name=name,
@@ -293,6 +318,66 @@ class QdrantAdapter(VectorStorePort):
             SearchHit(id=str(point.id), score=point.score, payload=point.payload or {})
             for point in response.points
         ]
+
+    def browse(
+        self,
+        name: str,
+        filters: dict | None = None,
+        limit: int = 10,
+        order_key: str | None = "date",
+        descending: bool = True,
+    ) -> list[SearchHit]:
+        query = (
+            models.OrderByQuery(order_by=self._order_by(order_key, descending))
+            if order_key
+            else None
+        )
+        response = self._retry(lambda: self.client.query_points(
+            collection_name=name,
+            query=query,
+            limit=limit,
+            query_filter=self._query_filter(filters),
+            with_payload=True,
+        ))
+        # No vector went in, so whatever the server puts in the score field is a
+        # placeholder (the in-process store says 1.0). The port promises 0.0:
+        # there is no relevance here to report or to sort by.
+        return [
+            SearchHit(id=str(point.id), score=0.0, payload=point.payload or {})
+            for point in response.points
+        ]
+
+    def browse_grouped(
+        self,
+        name: str,
+        group_by: str,
+        limit: int,
+        filters: dict | None = None,
+        exclude: set | None = None,
+        order_key: str = "date",
+        descending: bool = True,
+    ) -> list[SpeechGroup]:
+        response = self._retry(lambda: self.client.query_points_groups(
+            collection_name=name,
+            group_by=group_by,
+            query=models.OrderByQuery(order_by=self._order_by(order_key, descending)),
+            limit=limit,
+            # One hit per group is all it takes to name the group and read its
+            # ordering value; the passages a card shows are the caller's to pick
+            # (see the port docstring), so nothing more is fetched here.
+            group_size=1,
+            query_filter=self._query_filter(filters, exclude, group_by),
+            with_payload=[group_by, order_key],
+        ))
+        return [
+            SpeechGroup(speech_id=str(group.id), score=0.0, highlights=[])
+            for group in response.groups
+        ]
+
+    @staticmethod
+    def _order_by(key: str, descending: bool) -> models.OrderBy:
+        direction = models.Direction.DESC if descending else models.Direction.ASC
+        return models.OrderBy(key=key, direction=direction)
 
     def _hybrid_prefetch(
         self,
@@ -331,6 +416,27 @@ class QdrantAdapter(VectorStorePort):
         if self._hnsw_ef is None and quantization is None:
             return None
         return models.SearchParams(hnsw_ef=self._hnsw_ef, quantization=quantization)
+
+    @classmethod
+    def _query_filter(
+        cls,
+        filters: dict | None,
+        exclude: set | None = None,
+        group_by: str | None = None,
+    ) -> models.Filter | None:
+        """The payload filter of one query: the ``filters`` conditions, minus the
+        ``exclude``d ``group_by`` values (the "load more" cursor). ``None`` when
+        there is nothing to filter on, which is what Qdrant wants for "no
+        filter"."""
+        must = cls._build_conditions(filters)
+        must_not = (
+            [models.FieldCondition(key=group_by, match=models.MatchAny(any=list(exclude)))]
+            if exclude and group_by
+            else []
+        )
+        if not (must or must_not):
+            return None
+        return models.Filter(must=must or None, must_not=must_not or None)
 
     @classmethod
     def _build_conditions(cls, filters: dict | None) -> list[models.FieldCondition]:

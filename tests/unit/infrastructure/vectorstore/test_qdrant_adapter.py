@@ -1,5 +1,6 @@
 """Unit tests for the Qdrant adapter against an in-process store — no Docker."""
 
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -212,6 +213,134 @@ def test_search_grouped_applies_exact_filter(adapter):
         "c", [0.1, 0.2, 0.3], group_by="speech_id", limit=10, group_size=3,
         filters={"lang": "gl"})
     assert [g.speech_id for g in groups] == ["B"]
+
+
+# --- Browse: the vector-free path ------------------------------------------
+# What a filters-only query uses. No vector goes in, so no score comes out and
+# the order is the payload's, not relevance.
+
+
+def _dated(speech_id, date, **payload):
+    return _point({"speech_id": speech_id, "date": date, **payload})
+
+
+def test_browse_returns_filtered_points_newest_first(adapter):
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [
+        _dated("old", 20240101, speaker="A"),
+        _dated("new", 20260601, speaker="A"),
+        _dated("mid", 20250301, speaker="A"),
+        _dated("other", 20260701, speaker="B"),
+    ])
+    hits = adapter.browse("c", filters={"speaker": "A"}, limit=10)
+    assert [h.payload["speech_id"] for h in hits] == ["new", "mid", "old"]
+    assert all(hit.score == 0.0 for hit in hits)
+
+
+def test_browse_can_order_oldest_first(adapter):
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [_dated("old", 20240101), _dated("new", 20260601)])
+    hits = adapter.browse("c", limit=10, descending=False)
+    assert [h.payload["speech_id"] for h in hits] == ["old", "new"]
+
+
+def test_browse_honours_the_limit(adapter):
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [_dated(f"s{i}", 20260101 + i) for i in range(5)])
+    assert len(adapter.browse("c", limit=2)) == 2
+
+
+def test_browse_without_an_order_key_still_filters(adapter):
+    # How a speech's own passages are fetched: they all share one date, so
+    # ordering them by it is meaningless and the caller sorts by chunk instead.
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [
+        _dated("A", 20260101, chunk_index=1),
+        _dated("A", 20260101, chunk_index=0),
+        _dated("B", 20260101, chunk_index=0),
+    ])
+    hits = adapter.browse("c", filters={"speech_id": ["A"]}, limit=100, order_key=None)
+    assert {h.payload["chunk_index"] for h in hits} == {0, 1}
+    assert {h.payload["speech_id"] for h in hits} == {"A"}
+
+
+def test_browse_grouped_returns_distinct_speeches_newest_first(adapter):
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [
+        _dated("old", 20240101), _dated("old", 20240101),
+        _dated("new", 20260601), _dated("new", 20260601), _dated("new", 20260601),
+        _dated("mid", 20250301),
+    ])
+    groups = adapter.browse_grouped("c", group_by="speech_id", limit=10)
+    assert [g.speech_id for g in groups] == ["new", "mid", "old"]
+    # The store names the speeches; which passages preview them is the caller's
+    # call, since every passage of a speech shares its date.
+    assert all(group.highlights == [] and group.score == 0.0 for group in groups)
+
+
+def test_browse_grouped_honours_the_limit_and_excludes_seen_speeches(adapter):
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [_dated(s, d) for s, d in
+                         [("A", 20260301), ("B", 20260201), ("C", 20260101)]])
+    first = adapter.browse_grouped("c", group_by="speech_id", limit=2)
+    assert [g.speech_id for g in first] == ["A", "B"]
+    nxt = adapter.browse_grouped("c", group_by="speech_id", limit=2, exclude={"A", "B"})
+    assert [g.speech_id for g in nxt] == ["C"]
+
+
+def test_browse_grouped_applies_filters(adapter):
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [
+        _dated("A", 20260301, group="GS"),
+        _dated("B", 20260201, group="GP"),
+    ])
+    groups = adapter.browse_grouped(
+        "c", group_by="speech_id", limit=10, filters={"group": "GP"})
+    assert [g.speech_id for g in groups] == ["B"]
+
+
+# --- Payload indexes -------------------------------------------------------
+# The in-process store ignores payload indexes, so these assert on the requests
+# the adapter makes. A real server refuses to order_by an unindexed key at all,
+# which is what makes the date index load-bearing rather than a nicety.
+
+
+def _index_spy(adapter):
+    requested = {}
+    original = adapter.client.create_payload_index
+
+    def recording(**kwargs):
+        requested[kwargs["field_name"]] = kwargs["field_schema"]
+        return original(**kwargs)
+
+    adapter.client.create_payload_index = recording
+    return requested
+
+
+def test_ensure_collection_indexes_every_filterable_payload_key(adapter):
+    requested = _index_spy(adapter)
+    adapter.ensure_collection("c", 3)
+    assert requested == qdrant_mod._PAYLOAD_INDEXES
+    # date carries a range index because that is what order_by demands.
+    assert requested["date"] == qdrant_mod.models.PayloadSchemaType.INTEGER
+
+
+def test_an_existing_collection_gains_missing_payload_indexes(adapter):
+    # The migration path: a collection built before these existed picks them up on
+    # the next index run, without re-embedding anything.
+    adapter.ensure_collection("c", 3)
+    requested = _index_spy(adapter)
+    adapter.ensure_collection("c", 3)
+    assert set(requested) == set(qdrant_mod._PAYLOAD_INDEXES)
+
+
+def test_payload_indexes_already_present_are_left_alone(adapter):
+    adapter.ensure_collection("c", 3)
+    requested = _index_spy(adapter)
+    adapter.client.get_collection = lambda name: SimpleNamespace(
+        payload_schema=dict.fromkeys(qdrant_mod._PAYLOAD_INDEXES, "indexed"))
+    adapter.ensure_collection("c", 3)
+    assert requested == {}
 
 
 # --- Hybrid (dense + sparse) collections -----------------------------------

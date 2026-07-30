@@ -524,3 +524,120 @@ def test_top_up_keeps_the_query_filters():
     service.search_grouped("q", page_size=5, highlights=3, filters={"group": "GS"})
 
     assert store.searches[0][1] == {"group": "GS", "speech_id": ["A"]}
+
+
+# --- Browse: no query, no vector, no rerank ----------------------------------
+# What a filters-only query gets. Two store calls: the grouped browse names the
+# newest speeches, then one filtered fetch turns each into its opening passages.
+
+
+def _chunk(id_, speech_id, block=0, chunk=0, lang="es", original=True):
+    return SearchHit(id=id_, score=0.0, payload={
+        "text": id_, "speech_id": speech_id, "lang": lang, "original": original,
+        "block_index": block, "chunk_index": chunk})
+
+
+class _BrowseStore:
+    def __init__(self, groups, chunks):
+        self._groups = groups
+        self._chunks = chunks
+        self.grouped_calls = []
+        self.browse_calls = []
+
+    def browse_grouped(self, name, group_by, limit, filters=None, exclude=None,
+                       order_key="date", descending=True):
+        self.grouped_calls.append(dict(
+            name=name, group_by=group_by, limit=limit, filters=filters,
+            exclude=exclude, order_key=order_key, descending=descending))
+        return [SpeechGroup(speech_id=speech_id, score=0.0, highlights=[])
+                for speech_id in self._groups[:limit]]
+
+    def browse(self, name, filters=None, limit=10, order_key="date", descending=True):
+        self.browse_calls.append(dict(
+            name=name, filters=filters, limit=limit, order_key=order_key))
+        return list(self._chunks)
+
+
+def _browse_service(store, **overrides):
+    return SearchSpeeches(settings=_settings(**overrides), embedder=_FakeEmbedder(),
+                          store=store, reranker=_FakeReranker())
+
+
+def test_browse_returns_the_filtered_set_without_embedding_a_query():
+    class _Store(_FakeStore):
+        def browse(self, name, filters=None, limit=10, order_key="date",
+                   descending=True):
+            self.browsed = dict(name=name, filters=filters, limit=limit,
+                                order_key=order_key)
+            return [SearchHit(id="p1", score=0.0, payload={})]
+
+    store = _Store()
+    hits = _browse_service(store).browse(k=7, filters={"group": "GS", "lang": None})
+
+    assert store.browsed == dict(
+        name="speeches__ollama__qwen3_embedding_0_6b__3",  # dim from a probe embedding
+        filters={"group": "GS"},                           # None dropped as elsewhere
+        limit=7, order_key="date")
+    assert hits[0].id == "p1"
+    assert store.searched is None                           # never the searching path
+
+
+def test_browse_grouped_previews_each_speech_with_its_opening_passage():
+    store = _BrowseStore(
+        groups=["new", "old"],
+        chunks=[_chunk("new-2", "new", chunk=2), _chunk("old-0", "old"),
+                _chunk("new-0", "new", chunk=0), _chunk("new-1", "new", chunk=1)])
+
+    groups = _browse_service(store).browse_grouped(page_size=5)
+
+    assert [g.speech_id for g in groups] == ["new", "old"]   # store's date order kept
+    assert [h.id for h in groups[0].highlights] == ["new-0"]  # the speech's start
+    assert [h.id for h in groups[1].highlights] == ["old-0"]
+    assert all(group.score == 0.0 for group in groups)
+
+
+def test_browse_grouped_can_show_several_opening_passages_in_reading_order():
+    store = _BrowseStore(
+        groups=["A"],
+        chunks=[_chunk("a2", "A", block=1, chunk=0), _chunk("a0", "A", chunk=0),
+                _chunk("a1", "A", chunk=1)])
+
+    groups = _browse_service(store).browse_grouped(page_size=5, excerpts=3)
+
+    assert [h.id for h in groups[0].highlights] == ["a0", "a1", "a2"]
+
+
+def test_browse_grouped_previews_the_language_as_delivered():
+    # No query means no matched language, so the card shows the speech as spoken
+    # rather than its Spanish translation.
+    store = _BrowseStore(
+        groups=["A"],
+        chunks=[_chunk("es0", "A", lang="es", original=False),
+                _chunk("gl0", "A", lang="gl", original=True)])
+
+    groups = _browse_service(store).browse_grouped(page_size=5)
+
+    assert [h.id for h in groups[0].highlights] == ["gl0"]
+
+
+def test_browse_grouped_scopes_the_excerpt_fetch_to_the_page_and_its_filters():
+    store = _BrowseStore(groups=["A", "B"], chunks=[_chunk("a0", "A"), _chunk("b0", "B")])
+
+    _browse_service(store).browse_grouped(
+        page_size=2, filters={"speaker": "X", "role": None}, exclude={"seen"})
+
+    grouped, fetch = store.grouped_calls[0], store.browse_calls[0]
+    assert grouped["filters"] == {"speaker": "X"}       # None dropped
+    assert (grouped["limit"], grouped["exclude"]) == (2, {"seen"})
+    assert grouped["order_key"] == "date" and grouped["descending"] is True
+    # The second call carries the query's filters plus the page's speeches, and
+    # asks for no ordering: every passage of a speech shares its date.
+    assert fetch["filters"] == {"speaker": "X", "speech_id": ["A", "B"]}
+    assert fetch["order_key"] is None
+
+
+def test_browse_grouped_of_an_empty_page_costs_no_second_call():
+    store = _BrowseStore(groups=[], chunks=[])
+
+    assert _browse_service(store).browse_grouped(page_size=5) == []
+    assert store.browse_calls == []

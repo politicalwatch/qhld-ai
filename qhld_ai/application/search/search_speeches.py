@@ -5,6 +5,10 @@ search in Qdrant (optionally filtered by exact payload matches — group, legisl
 lang, speaker…), and returns the ranked hits. Each hit's payload carries the speech
 metadata and the passage snippet, so callers can render results without a Mongo
 round-trip; ``Speeches.get`` is available for full-text hydration when needed.
+
+``browse``/``browse_grouped`` are the same thing without a query: for a request
+that carries only filters there is no text to embed and nothing to rank, so they
+return the newest matching passages/speeches instead, unscored.
 """
 
 from langsmith import traceable
@@ -38,6 +42,7 @@ class SearchSpeeches:
             sparse_embedder if sparse_embedder is not None
             else self._sparse_from_settings()
         )
+        self._collection_name = None
 
     def _reranker_from_settings(self):
         """Build the configured reranker, or ``None`` for the "noop"/unset default
@@ -58,6 +63,16 @@ class SearchSpeeches:
         from qhld_ai.infrastructure.sparse.factory import create_sparse_embedder_from_env
 
         return create_sparse_embedder_from_env(self.settings)
+
+    def _collection(self):
+        """The target collection name for a query that has no vector to read the
+        model dimension off (the browse path). One probe embedding per process,
+        memoized — the searching paths keep deriving it from the query vector
+        they already computed."""
+        if self._collection_name is None:
+            dim = len(self.embedder.embed_query("probe"))
+            self._collection_name = collection_name(self.settings, dim)
+        return self._collection_name
 
     def _store_kwargs(self, query):
         """Hybrid searches pass the lexical query vector as an extra keyword; the
@@ -92,6 +107,15 @@ class SearchSpeeches:
     def _store_search_grouped(self, collection, vector, **kwargs):
         return self.store.search_grouped(collection, vector, **kwargs)
 
+    @traceable(name="browse", run_type="retriever")
+    def _store_browse(self, collection, filters, limit, order_key="date"):
+        return self.store.browse(
+            collection, filters=filters, limit=limit, order_key=order_key)
+
+    @traceable(name="browse_grouped", run_type="retriever")
+    def _store_browse_grouped(self, collection, **kwargs):
+        return self.store.browse_grouped(collection, **kwargs)
+
     @traceable(name="rerank", run_type="chain")
     def _rerank(self, query, hits, k):
         return self.reranker.rerank(query, hits, k)
@@ -107,13 +131,13 @@ class SearchSpeeches:
         # The query vector's length is the model dimension, which is part of the
         # per-model collection name — no separate probe needed.
         collection = collection_name(self.settings, len(vector))
-        clean = {key: value for key, value in (filters or {}).items() if value is not None}
+        clean = self._clean(filters)
         extra = self._store_kwargs(query)
         if self.reranker is None:
-            return self._store_search(collection, vector, k, clean or None, **extra)
+            return self._store_search(collection, vector, k, clean, **extra)
         # Over-fetch a wide candidate pool for the cross-encoder to reorder.
         fetch = max(k, self.settings.reranker_top_n)
-        hits = self._store_search(collection, vector, fetch, clean or None, **extra)
+        hits = self._store_search(collection, vector, fetch, clean, **extra)
         reranked = self._rerank(query, hits, k, langsmith_extra=self._rerank_metadata())
         return self._above_floor(reranked, apply_floor)
 
@@ -128,7 +152,7 @@ class SearchSpeeches:
         to fetch the next page ("load more")."""
         vector = self._embed_query(query)
         collection = collection_name(self.settings, len(vector))
-        clean = {key: value for key, value in (filters or {}).items() if value is not None}
+        clean = self._clean(filters)
         extra = self._store_kwargs(query)
         if self.reranker is None:
             return self._store_search_grouped(
@@ -137,7 +161,7 @@ class SearchSpeeches:
                 group_by="speech_id",
                 limit=page_size,
                 group_size=highlights,
-                filters=clean or None,
+                filters=clean,
                 exclude=exclude,
                 **extra,
             )
@@ -156,7 +180,7 @@ class SearchSpeeches:
             group_by="speech_id",
             limit=page_size * 2,
             group_size=pool_size,
-            filters=clean or None,
+            filters=clean,
             exclude=exclude,
             **extra,
         )
@@ -182,6 +206,69 @@ class SearchSpeeches:
             pool_size, highlights, apply_floor, scored)
         page.sort(key=lambda group: group.score, reverse=True)
         return page
+
+    @traceable(name="browse_speeches", run_type="chain")
+    def browse(self, k=10, filters=None) -> list[SearchHit]:
+        """The newest ``k`` filtered passages — the vector-free counterpart of
+        ``search``, for a query that named only filters and no topic. Nothing was
+        searched for, so there is nothing to rank by: recency stands in."""
+        return self._store_browse(self._collection(), self._clean(filters), k)
+
+    @traceable(name="browse_speeches_grouped", run_type="chain")
+    def browse_grouped(self, page_size=10, excerpts=1, filters=None,
+                       exclude=None) -> list[SpeechGroup]:
+        """The newest ``page_size`` filtered speeches, each with the first
+        ``excerpts`` passages of the speech as its card text. Same stateless
+        ``exclude`` cursor as ``search_grouped``.
+
+        Two store calls, no embedding and no reranking: the grouped browse names
+        the speeches (every passage of one shares its date, so the store cannot
+        say which passage opens it), then one filtered fetch of just those
+        speeches' passages puts the excerpt in reading order. The page keeps the
+        store's date order — there are no scores to sort by."""
+        collection = self._collection()
+        clean = self._clean(filters)
+        groups = self._store_browse_grouped(
+            collection, group_by="speech_id", limit=page_size, filters=clean,
+            exclude=exclude)
+        if not groups:
+            return []
+        # k is a ceiling the store API requires, not a passage cap: the speech_id
+        # filter narrows candidates to these speeches' own passages.
+        hits = self._store_browse(
+            collection, {**(clean or {}), "speech_id": [g.speech_id for g in groups]},
+            _TOPUP_K, order_key=None)
+        passages = {}
+        for hit in hits:
+            passages.setdefault(hit.payload.get("speech_id"), []).append(hit)
+        return [
+            self._opening_group(group.speech_id, passages.get(group.speech_id, []),
+                                excerpts)
+            for group in groups
+        ]
+
+    @staticmethod
+    def _clean(filters):
+        """Drop unset filter keys, as every retrieval path does before handing
+        them to the store; ``None`` for "no filters at all"."""
+        clean = {key: value for key, value in (filters or {}).items() if value is not None}
+        return clean or None
+
+    @staticmethod
+    def _opening_group(speech_id, hits, excerpts) -> SpeechGroup:
+        """One browsed speech's card: its opening passages, in reading order.
+
+        The language kept is the as-delivered one (``original``), not the
+        matched one ``_build_group`` picks — a browse matched no passage, so
+        there is no query language to follow, and a Galician speech is more
+        honestly previewed in Galician than in its Spanish translation. Score is
+        0.0 throughout: recency ordered this page, not relevance."""
+        original = [hit for hit in hits if hit.payload.get("original")] or hits
+        ordered = sorted(
+            original,
+            key=lambda hit: (hit.payload.get("block_index") or 0,
+                             hit.payload.get("chunk_index") or 0))
+        return SpeechGroup(speech_id=speech_id, score=0.0, highlights=ordered[:excerpts])
 
     def _build_group(self, speech_id, hits, scored, highlights, apply_floor):
         """One speech's card, built from its scored passages — or ``None`` when the
@@ -241,7 +328,8 @@ class SearchSpeeches:
         # k is a ceiling the store API requires, not a passage cap: the speech_id
         # filter narrows candidates to these speeches' own passages.
         hits = self._store_search(
-            collection, vector, _TOPUP_K, {**filters, "speech_id": speech_ids}, **extra)
+            collection, vector, _TOPUP_K,
+            {**(filters or {}), "speech_id": speech_ids}, **extra)
         fresh = [hit for hit in hits if hit.id not in scored]
         if not fresh:
             return page
