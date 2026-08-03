@@ -94,6 +94,47 @@ def test_partially_resolved_speakers_keep_the_resolved_one(resolver):
         ("speaker", "Fulano de Tal", False)]
 
 
+# --- collisions: resolved, but only by list order --------------------------
+
+
+COLLIDING = {"speaker": {"Rueda Perelló, Patricia", "Rueda Pérez, Juan Carlos"}}
+
+
+def test_a_shared_surname_resolves_but_is_recorded_as_ambiguous():
+    # token_set_ratio scores a bare surname 100 against everyone carrying it, so both
+    # Ruedas tie and the winner is decided by the vocabulary's (set) iteration order.
+    # The query still resolves — nothing here is unsatisfiable — but WHICH Rueda is
+    # arbitrary, so it must not pass as a clean success.
+    resolver = _resolver(distinct=lambda key: COLLIDING.get(key, set()), deputies=[])
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Rueda"]))
+
+    assert r.filters["speaker"] in COLLIDING["speaker"]
+    assert not r.blocked and not r.unresolved
+    assert len(r.ambiguous) == 1
+    match = r.ambiguous[0]
+    assert (match.field, match.value) == ("speaker", "Rueda")
+    assert match.chosen == r.filters["speaker"]
+    assert sorted(match.tied) == sorted(COLLIDING["speaker"])
+
+
+def test_an_unshared_win_is_not_ambiguous():
+    resolver = _resolver(distinct=lambda key: COLLIDING.get(key, set()), deputies=[])
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Patricia Rueda"]))
+
+    assert r.filters["speaker"] == "Rueda Perelló, Patricia"
+    assert r.ambiguous == []
+
+
+def test_a_sub_threshold_near_miss_is_not_ambiguous():
+    # Only a win can be ambiguous: a miss is already reported through ``unresolved``,
+    # and reporting it twice would double-count it downstream.
+    resolver = _resolver(distinct=lambda key: COLLIDING.get(key, set()), deputies=[])
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Fulano de Tal"]))
+
+    assert r.ambiguous == []
+    assert [e.field for e in r.unresolved] == ["speaker"]
+
+
 # --- curated deputy aliases (public names) ---------------------------------
 # A deputy the public knows by another name than the official one. "Tesh Sidi"
 # shares no token with "Andala Ubbi, Teslem", so it scores far below any usable

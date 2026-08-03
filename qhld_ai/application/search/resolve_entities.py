@@ -143,12 +143,31 @@ class UnresolvedEntity:
 
 
 @dataclass
+class AmbiguousMatch:
+    """A value that resolved, but only because a tie was broken arbitrarily.
+
+    Several catalog names scored identically and one was picked by list order, so the
+    query DID resolve — ``chosen`` is in ``filters`` and ``notes`` records it as a
+    success. That is the difference from ``UnresolvedEntity``: nothing failed, and the
+    caller has no reason to treat the search as degraded. It is recorded because the
+    choice is not reproducible (the vocabulary is a set, so its order can differ
+    between processes) and because which names collide is worth knowing: some of these
+    want a disambiguation rule rather than a new catalog entry."""
+    field: str
+    value: str
+    chosen: str
+    tied: list[str]
+
+
+@dataclass
 class Resolution:
     """The store-ready filters plus a human-readable trace of how each field
     resolved (or why it did not)."""
     filters: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     unresolved: list[UnresolvedEntity] = field(default_factory=list)
+    # Resolved, but arbitrarily — see AmbiguousMatch. Never affects ``blocked``.
+    ambiguous: list[AmbiguousMatch] = field(default_factory=list)
 
     @property
     def blocked(self) -> bool:
@@ -394,11 +413,29 @@ class EntityResolver:
     def _fuzzy_match(result, payload_key, raw, choices, threshold):
         """Best fuzzy match for one raw value, traced in ``notes`` when it clears
         ``threshold``; otherwise ``(None, suggestion)`` with the best sub-threshold
-        candidate for the caller to report."""
-        match = process.extractOne(
-            raw, choices, scorer=fuzz.token_set_ratio) if choices else None
+        candidate for the caller to report.
+
+        A win shared by several choices is additionally recorded on
+        ``result.ambiguous``: ``token_set_ratio`` scores a bare surname 100 against
+        everyone who carries it, so "Rueda" ties every Rueda in the vocabulary and which
+        one wins is decided by list order — and the vocabularies here come from sets, so
+        that order is not stable across processes. The pick itself is unchanged; it is
+        only no longer silent.
+
+        ``extract`` rather than ``extractOne`` so the tie is visible, and it picks the
+        same winner: ``extractOne`` takes ``max``, which keeps the first of equal scores,
+        and ``extract`` sorts stably, which leaves that same one first. Rows are indexed
+        rather than unpacked because their width depends on the input type (thefuzz
+        yields pairs for a list, triples for a mapping)."""
+        ranked = process.extract(
+            raw, choices, scorer=fuzz.token_set_ratio, limit=None) if choices else []
+        match = ranked[0] if ranked else None
         if match and match[1] >= threshold:
             result.notes.append(f"{payload_key}: '{raw}' → '{match[0]}' ({match[1]})")
+            tied = [row[0] for row in ranked if row[1] == match[1]]
+            if len(tied) > 1:
+                result.ambiguous.append(
+                    AmbiguousMatch(payload_key, raw, match[0], tied))
             return match[0], None
         return None, (f"'{match[0]}' ({match[1]})" if match else None)
 
