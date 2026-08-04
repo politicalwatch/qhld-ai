@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     llm_provider: str = "anthropic"
     llm_model: str = "claude-sonnet-4-6"
     llm_temperature: float = 0.0
+    llm_reasoning_effort: str = ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     google_api_key: str = ""
@@ -73,10 +74,11 @@ class Settings(BaseSettings):
     # Query understanding: parse a NL query into structured
     # filters + a residual semantic query. Decoupled from the main llm_* so the
     # parser can use a different model than any future answer-synthesis; empty
-    # provider/model fall back to llm_provider/llm_model.
+    # provider/model/effort fall back to their llm_* counterparts.
     query_parser_provider: str = "llm"
     query_parser_llm_provider: str = ""
     query_parser_llm_model: str = ""
+    query_parser_llm_reasoning_effort: str = ""
 
     # Cross-encoder reranker. "noop" leaves bi-encoder order
     # untouched (the clean baseline); any other provider over-fetches

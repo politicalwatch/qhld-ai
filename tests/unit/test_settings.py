@@ -83,6 +83,18 @@ def test_retrieval_tuning_defaults_to_no_opinion(monkeypatch):
     assert settings.qdrant_quantization_rescore is None
 
 
+def test_reasoning_effort_defaults_to_unset_and_is_not_validated():
+    # Accepted values are model-specific, so the value is passed through and the
+    # API rejects a bad one with a message naming the valid set. Nothing to
+    # validate here — only "empty means don't send it".
+    settings = Settings(_env_file=None)
+    assert settings.llm_reasoning_effort == ""
+    assert settings.query_parser_llm_reasoning_effort == ""
+    assert Settings(_env_file=None, llm_reasoning_effort="xhigh",
+                    query_parser_llm_reasoning_effort="none"
+                    ).query_parser_llm_reasoning_effort == "none"
+
+
 def test_blank_retrieval_tuning_values_mean_unset():
     # "VAR=" is how an env file says "leave this to the server"; it must not be a
     # startup error.

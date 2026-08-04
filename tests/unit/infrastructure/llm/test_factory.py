@@ -82,6 +82,39 @@ def test_vmlx_uses_its_own_base_url():
     assert llm.base_url == "http://vmlx:8080"
 
 
+@pytest.mark.parametrize("provider,key", [("openai", "openai_api_key"),
+                                          ("novita", "novita_api_key")])
+def test_reasoning_effort_is_sent_only_when_configured(provider, key):
+    unset = create_llm_from_env(
+        _settings(llm_provider=provider, llm_model="gpt-5.4-nano-2026-03-17", **{key: "x"}))
+    assert unset.reasoning_effort is None
+
+    setted = create_llm_from_env(
+        _settings(llm_provider=provider, llm_model="gpt-5.4-nano-2026-03-17",
+                  llm_reasoning_effort="low", **{key: "x"}))
+    assert setted.reasoning_effort == "low"
+
+
+def test_gpt5_keeps_temperature_only_at_effort_none():
+    """Pins a langchain behaviour we rely on rather than implement.
+
+    langchain drops temperature for gpt-5* non-chat models at every effort except
+    "none", and drops it SILENTLY. So "no reasoning" is also the only setting
+    where our temperature=0.0 actually reaches the API. If an upgrade changes
+    this, the adapter's comment goes stale and the parser's determinism story
+    changes with it — so fail here instead of finding out from a metric.
+    """
+    def build(effort):
+        return create_llm_from_env(
+            _settings(llm_provider="openai", llm_model="gpt-5.4-nano-2026-03-17",
+                      llm_temperature=0.0, llm_reasoning_effort=effort,
+                      openai_api_key="x"))
+
+    assert build("none").temperature == pytest.approx(0.0)
+    for effort in ("", "low", "medium", "high"):
+        assert build(effort).temperature is None, effort
+
+
 def test_novita_uses_its_own_key_and_the_hosted_endpoint():
     s = _settings(
         llm_provider="novita",

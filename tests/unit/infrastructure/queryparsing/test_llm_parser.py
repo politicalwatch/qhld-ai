@@ -117,3 +117,17 @@ def test_empty_parser_llm_settings_fall_back_to_main_llm(fake_llm):
     passed = fake_llm["settings"]
     assert passed.llm_provider == "anthropic"
     assert passed.llm_model == "claude-sonnet-4-6"
+
+
+def test_decoupled_parser_reasoning_effort_overrides_main_llm(fake_llm):
+    settings = Settings(
+        _env_file=None, llm_reasoning_effort="high",
+        query_parser_llm_reasoning_effort="none")
+    LLMQueryParser(settings).parse("hola", date(2025, 7, 3))
+    assert fake_llm["settings"].llm_reasoning_effort == "none"
+
+
+def test_empty_parser_reasoning_effort_falls_back_to_main_llm(fake_llm):
+    settings = Settings(_env_file=None, llm_reasoning_effort="low")
+    LLMQueryParser(settings).parse("hola", date(2025, 7, 3))
+    assert fake_llm["settings"].llm_reasoning_effort == "low"

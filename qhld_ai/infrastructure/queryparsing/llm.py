@@ -109,6 +109,9 @@ class LLMQueryParser:
                 overrides["llm_provider"] = self.settings.query_parser_llm_provider
             if self.settings.query_parser_llm_model:
                 overrides["llm_model"] = self.settings.query_parser_llm_model
+            if self.settings.query_parser_llm_reasoning_effort:
+                overrides["llm_reasoning_effort"] = (
+                    self.settings.query_parser_llm_reasoning_effort)
             llm_settings = self.settings.model_copy(update=overrides)
             chat = create_llm_from_env(llm_settings)
             self._structured = chat.with_structured_output(ParsedQuery)
