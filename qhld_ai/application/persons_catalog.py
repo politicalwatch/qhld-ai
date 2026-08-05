@@ -3,13 +3,14 @@
 Two data files here both hold a field called ``aliases``, and they do NOT reach the
 same places. What a name is allowed to do depends on which list it is in:
 
-================================  ========  =======  ========
-curated list                      mentions  speaker  NER tags
-================================  ========  =======  ========
-persons_catalog ``aliases``       yes       no       no
-deputy_profiles ``aliases``       yes       yes      no
-deputy_profiles ``tag_surfaces``  no        no       yes
-================================  ========  =======  ========
+====================================  ========  =======  ========  ==========
+curated list                          mentions  speaker  NER tags  extraction
+====================================  ========  =======  ========  ==========
+persons_catalog ``aliases``           yes       no       no        no
+deputy_profiles ``aliases``           yes       yes      no        no
+deputy_profiles ``tag_surfaces``      no        no       yes       no
+deputy_profiles ``speaker_variants``  no        no       no        yes
+====================================  ========  =======  ========  ==========
 
 - *mentions* — the alias becomes another key on that person's ``PersonEntry``, so a
   span resolves to them. Keys are scored as a MAX, never summed, so a list of variants
@@ -22,6 +23,10 @@ deputy_profiles ``tag_surfaces``  no        no       yes
 - *NER tags* — ``tag_surfaces`` alone feeds the gazetteer. This is the one list that
   can create spans rather than merely resolve them, so it is the one with real
   precision risk, and it has its own rules (below).
+- *extraction* — ``speaker_variants`` is the odd one out: it matches nothing at query
+  time at all. It names the OTHER spellings the source has used for a deputy's own
+  ``speaker`` value, and the extractor rewrites them to ``name`` as it stores a speech.
+  The other lists let a name reach a person; this one stops one person being two names.
 
 Both files also carry ``roles``, which reaches nothing in the table above: it is not a
 name but the offices its holder is known for, and it exists because the office a speech
@@ -53,6 +58,14 @@ filtering). The spaCy adapter's out-of-vocabulary gate is a second line of defen
 an in-vocabulary token is silently ignored rather than tagged. Known gap: a surface
 glued to a dash tokenizes as one token ("Tesh―") and a case-sensitive pattern cannot
 match it, so those occurrences stay untagged.
+
+Curating a ``speaker_variant`` is the strictest of the three and the least forgiving of
+a near miss, because it does not score anything: it must be the corpus ``speaker`` string
+**verbatim**, and it renames every speech stored under it. Matching is exact and never
+fuzzy — fuzzily folding one speaker into another is the very failure this exists to undo,
+and a bare surname ties several deputies at 100. A variant must therefore also not be any
+other deputy's catalog ``name``. A spelling that no longer occurs is inert, not an error:
+it simply never matches, so a stale curation costs nothing and can stay.
 
 Non-deputies come from two sources:
 
@@ -102,14 +115,32 @@ def load_curated(path=CATALOG_FILE):
 
 def load_deputy_profiles(path=DEPUTY_PROFILES_FILE):
     """Read the curated deputy records (a JSON array of
-    ``{deputy_id, name, aliases, tag_surfaces, roles}``).
+    ``{deputy_id, name, aliases, tag_surfaces, speaker_variants, roles}``).
 
-    Unlike the non-deputy catalog, these records reach two further places: ``aliases``
-    also build the speaker-path alias index, and ``tag_surfaces`` — a SEPARATE, stricter
-    list — feeds the NER gazetteer. See the reach table at the top of this module before
-    adding to either."""
+    Unlike the non-deputy catalog, these records reach three further places: ``aliases``
+    also build the speaker-path alias index, ``tag_surfaces`` — a SEPARATE, stricter
+    list — feeds the NER gazetteer, and ``speaker_variants`` renames a speaker at
+    extraction time and is not a query-side name at all. See the reach table at the top
+    of this module before adding to any of them."""
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def canonical_speakers(records):
+    """``{variant spelling: canonical name}`` — the *extraction* reach of the profiles.
+
+    The source spells the same deputy two ways ("Ogou Corbi, Viviane" and "Ogou i Corbi,
+    Viviane"), and only one spelling matches the deputy catalog. Left alone, one person
+    becomes two corpus speakers: their speeches split across two filter values, and the
+    orphan spelling misses the catalog join that stamps ``constituency``.
+
+    Keyed on the exact string, so the caller is a plain dict lookup and a spelling that
+    was not curated passes through untouched. Deliberately NOT fuzzy: a bare surname
+    scores 100 against every deputy who carries it, so a fuzzy fold here would merge
+    people rather than spellings — the failure this map exists to reverse."""
+    return {variant: row["name"]
+            for row in (records or []) if row.get("name")
+            for variant in row.get("speaker_variants", ()) if variant}
 
 
 def deputy_aliases_by_id(records):

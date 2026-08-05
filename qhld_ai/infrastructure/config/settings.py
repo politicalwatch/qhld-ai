@@ -111,8 +111,13 @@ class Settings(BaseSettings):
     # reranked path, and only for topical queries — natural search skips it for
     # pure-entity and pure-filter queries, where valid brief-mention hits
     # legitimately score as low as junk. 0.0 disables it, keeping the bi-encoder
-    # baseline untouched. Calibrated to the reranker model's raw scores —
-    # re-check if the model changes.
+    # baseline untouched. Calibrated to the reranker model's raw scores, so it has
+    # to be re-checked when the model changes — and, less obviously, when the
+    # off-domain probe set changes: the value is only ever "high enough" relative
+    # to the worst junk anyone has thought to try, and a hardening round once moved
+    # that ceiling 7x overnight and left the calibrated floor leaking. The sweep
+    # costs one retrieval pass for every floor value at once
+    # (`qhld eval retrieval --floors`), so re-running it is never the expensive part.
     reranker_score_floor: float = 0.0
 
     # Sparse lexical embeddings (hybrid retrieval). "none" keeps pure dense

@@ -6,6 +6,21 @@
     "tag_surfaces": ["Tesh"]
   },
   {
+    "deputy_id": "alegria-continente-maria-pilar",
+    "name": "Alegría Continente, María Pilar",
+    "speaker_variants": ["Alegría Continente, Pilar"]
+  },
+  {
+    "deputy_id": "lago-penas-manuel",
+    "name": "Lago Peñas, Manuel",
+    "speaker_variants": ["Lago Peñas, José Manuel"]
+  },
+  {
+    "deputy_id": "ogou-i-corbi-viviane",
+    "name": "Ogou i Corbi, Viviane",
+    "speaker_variants": ["Ogou Corbi, Viviane"]
+  },
+  {
     "deputy_id": "nunez-feijoo-alberto",
     "name": "Núñez Feijóo, Alberto",
     "roles": ["Presidente del Partido Popular", "Presidente de la Xunta de Galicia"]

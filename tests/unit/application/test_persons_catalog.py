@@ -9,6 +9,7 @@ import pytest
 from qhld_ai.application.persons_catalog import (
     _gender_from_role,
     alias_index,
+    canonical_speakers,
     curated_offices,
     deputy_aliases_by_id,
     gazetteer_surfaces,
@@ -98,9 +99,10 @@ def test_shipped_profile_file_is_well_formed():
         assert row.get("deputy_id"), row
         assert row.get("name"), row
         assert "," in row["name"], f"canonical name must be 'Apellido, Nombre': {row}"
-        # A record earns its place by carrying at least one of the three curated things;
+        # A record earns its place by carrying at least one of the four curated things;
         # an entry with none of them is a typo, not data.
-        assert (row.get("aliases") or row.get("tag_surfaces") or row.get("roles")), row
+        assert (row.get("aliases") or row.get("tag_surfaces") or row.get("roles")
+                or row.get("speaker_variants")), row
         for alias in row.get("aliases", ()):
             assert normalize_span(alias), f"alias normalizes away: {alias!r}"
 
@@ -112,6 +114,54 @@ def test_shipped_aliases_are_unique_across_records():
             key = normalize_span(alias)
             assert key not in seen, f"duplicate alias across records: {alias!r}"
             seen.add(key)
+
+
+# --- speaker variants (what the extractor renames) -------------------------
+
+def test_canonical_speakers_maps_each_variant_to_the_canonical_name():
+    records = [{"deputy_id": "ogou-i-corbi-viviane", "name": "Ogou i Corbi, Viviane",
+                "speaker_variants": ["Ogou Corbi, Viviane"]}]
+    assert canonical_speakers(records) == {"Ogou Corbi, Viviane": "Ogou i Corbi, Viviane"}
+
+
+def test_canonical_speakers_is_empty_without_the_field():
+    # The Tesh Sidi record carries aliases only: curating one list must not enrol a
+    # deputy in another.
+    assert canonical_speakers(RECORDS) == {}
+    assert canonical_speakers([]) == {}
+    assert canonical_speakers(None) == {}
+
+
+def test_canonical_speakers_matches_the_exact_string_only():
+    # Exact, never fuzzy: the map has to be usable as a plain dict lookup, and a bare
+    # surname would score 100 against every deputy who carries it.
+    mapping = canonical_speakers(
+        [{"deputy_id": "lago-penas-manuel", "name": "Lago Peñas, Manuel",
+          "speaker_variants": ["Lago Peñas, José Manuel"]}])
+    assert mapping.get("Lago Peñas") is None
+    assert mapping.get("lago peñas, josé manuel") is None
+    assert mapping["Lago Peñas, José Manuel"] == "Lago Peñas, Manuel"
+
+
+def test_shipped_variants_are_shaped_like_a_corpus_speaker_value():
+    for row in load_deputy_profiles():
+        for variant in row.get("speaker_variants", ()):
+            assert "," in variant, (
+                f"a variant is a corpus 'Apellido, Nombre' value verbatim: {variant!r}")
+            assert variant != row["name"], f"variant repeats its own name: {variant!r}"
+
+
+def test_shipped_variants_never_name_another_curated_deputy():
+    # Renaming is unconditional, so a variant that is somebody else's canonical name
+    # would silently merge two people — the failure this list exists to undo.
+    records = load_deputy_profiles()
+    names = {row["name"] for row in records}
+    seen = set()
+    for row in records:
+        for variant in row.get("speaker_variants", ()):
+            assert variant not in names, f"variant is another deputy's name: {variant!r}"
+            assert variant not in seen, f"duplicate variant across records: {variant!r}"
+            seen.add(variant)
 
 
 # --- tag surfaces (what the NER may tag) -----------------------------------
