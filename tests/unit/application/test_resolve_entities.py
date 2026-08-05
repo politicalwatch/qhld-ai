@@ -130,25 +130,63 @@ def test_a_tied_surname_is_settled_by_its_first_bearer():
     assert r.ambiguous[0].kept == ["Bravo Baena, Juan"]
 
 
-def test_a_tied_first_surname_is_settled_by_government_office():
-    # The motivating case: both carry "Montero", but only one is the finance minister,
-    # and she is who a question about public finances means. Speech volume would pick the
-    # other one (56 speeches to her 47), which is why it is not the signal.
+def test_the_motivating_case_is_settled_without_any_prior():
+    # "Montero" is Montero Cuadrado's FIRST surname and Vaquero Montero's second, so the
+    # surname alone identifies her. This is the query that used to return zero results,
+    # and it resolves with no appeal to her office — which is why removing the office
+    # tie-break does not regress it.
     vocab = {"speaker": {"Montero Cuadrado, María Jesús", "Vaquero Montero, Maribel"}}
-    resolver = _resolver(
-        distinct=lambda key: vocab.get(key, set()), deputies=[],
-        speaker_offices=[{"speaker": "Montero Cuadrado, María Jesús",
-                          "role": "Vicepresidenta Primera del Gobierno y Ministra de Hacienda"}])
+    resolver = _resolver(distinct=lambda key: vocab.get(key, set()), deputies=[])
     r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Montero"]))
 
     assert r.filters["speaker"] == "Montero Cuadrado, María Jesús"
     assert r.ambiguous[0].kept == ["Montero Cuadrado, María Jesús"]
 
 
-def test_office_never_decides_when_nobody_bears_it_as_a_first_surname():
-    # Measured and rejected: letting office decide here yields "Caballero" -> Cuerpo
-    # Caballero and "Muñoz" -> Aagesen Muñoz, people nobody refers to that way. Both
-    # carry it second, so the tie is not about them and stays open.
+def test_an_office_holder_does_not_exclude_the_others_who_share_the_surname():
+    # Tried the other way and measured: as a filter, office kept the prime minister (41
+    # speeches) and threw away Sánchez Serna (59). Holding office makes somebody a likelier
+    # referent, not the only possible one — a search for any of these people is plausible.
+    vocab = {"speaker": {"Sánchez Pérez-Castejón, Pedro", "Sánchez Serna, Javier",
+                         "Sánchez Torregrosa, Maribel"}}
+    resolver = _resolver(
+        distinct=lambda key: vocab.get(key, set()), deputies=[],
+        speaker_offices=[{"speaker": "Sánchez Pérez-Castejón, Pedro",
+                          "role": "Presidente del Gobierno"}])
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Sánchez"]))
+
+    assert r.filters["speaker"] == sorted(vocab["speaker"])
+    assert sorted(r.ambiguous[0].kept) == sorted(vocab["speaker"])
+
+
+def test_the_office_holder_is_offered_first_among_the_candidates():
+    # The one thing a prior may do: order the list the client offers as "did you mean".
+    vocab = {"speaker": {"Sánchez Pérez-Castejón, Pedro", "Sánchez Serna, Javier",
+                         "Sánchez Torregrosa, Maribel"}}
+    resolver = _resolver(
+        distinct=lambda key: vocab.get(key, set()), deputies=[],
+        speaker_offices=[{"speaker": "Sánchez Pérez-Castejón, Pedro",
+                          "role": "Presidente del Gobierno"}])
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Sánchez"]))
+
+    assert r.ambiguous[0].kept[0] == "Sánchez Pérez-Castejón, Pedro"
+    # ...and the rest alphabetically behind them
+    assert r.ambiguous[0].kept[1:] == ["Sánchez Serna, Javier",
+                                       "Sánchez Torregrosa, Maribel"]
+
+
+def test_candidates_are_alphabetical_when_no_office_is_known():
+    vocab = {"speaker": {"Núñez Guijarro, José Enrique", "Núñez Feijóo, Alberto",
+                         "Núñez González, Noelia"}}
+    resolver = _resolver(distinct=lambda key: vocab.get(key, set()), deputies=[])
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Núñez"]))
+
+    assert r.ambiguous[0].kept == sorted(vocab["speaker"])
+
+
+def test_a_surname_everybody_carries_second_keeps_the_whole_tie():
+    # Nobody bears "Caballero" first, so narrowing has nothing to say. Letting office
+    # decide here was measured and rejected — it yields "Caballero" -> Cuerpo Caballero.
     vocab = {"speaker": {"Cuerpo Caballero, Carlos", "Sierra Caballero, Francisco"}}
     resolver = _resolver(
         distinct=lambda key: vocab.get(key, set()), deputies=[],

@@ -200,10 +200,10 @@ class EntityResolver:
         unfiltered, but curated deputy aliases still serve the speaker path, which needs
         no catalog.
 
-        ``speaker_offices`` is ``[{speaker, role}]`` (``Speeches.distinct_speaker_offices``)
-        and breaks a tied surname in favour of the office holder — the only thing that
-        distinguishes the minister everyone means from the backbencher who shares her
-        name. Omit it and that step simply never fires, leaving the tie to fail open."""
+        ``speaker_offices`` is ``[{speaker, role}]`` (``Speeches.distinct_speaker_offices``).
+        It does NOT decide anything — it only sorts the candidates reported for a shared
+        surname so the office holder is offered first (see ``_by_prominence``). Omit it and
+        the same people resolve, listed alphabetically instead."""
         self._distinct = distinct
         self._office_families = {}
         for row in speaker_offices or []:
@@ -285,42 +285,44 @@ class EntityResolver:
         """The speaker value(s) to filter on — one when the tie can be broken on
         evidence, all of them when it cannot.
 
-        The evidence, in order:
+        The only thing that identifies a person is their **first surname**. Spanish practice
+        is to name somebody by it, so "Bravo" is Juan Bravo and not Aitor Esteban Bravo, and
+        that settles 33 of the corpus's 96 tied surnames on its own. When several bear it
+        first, all of them are kept.
 
-        1. **First surname.** Spanish practice is to name somebody by their first
-           surname, so "Bravo" is Juan Bravo, not Aitor Esteban Bravo. Measured to
-           settle 33 of the corpus's 96 tied surnames on its own.
-        2. **Government office**, but only *within* the first-surname pool. Measured to
-           settle 8 more, and it is what sends "Montero" to the finance minister rather
-           than to the deputy who merely shares her second surname.
+        A pick becomes a hard Qdrant filter, so choosing wrongly returns **zero results** —
+        indistinguishable to the user from "we have no coverage of her". Keeping every
+        candidate lets the topic decide what surfaces first, which is the signal the resolver
+        never had: measured over the real search stack, the intended person came back
+        top-ranked in 20 of 25 cases and present in 22, against roughly 7.6 of 25 before.
 
-        What is deliberately NOT done is guess when neither applies. The pick used to be
-        a hard Qdrant filter, so a wrong guess returned **zero results** — indistinguishable
-        to the user from "we have no coverage of her". Filtering on every tied candidate
-        instead keeps the search open and lets the topic decide what surfaces first, which
-        is the signal the resolver never had: measured over the real search stack, the
-        intended person came back top-ranked in 20 of 25 cases and was present in 22,
-        against roughly 7.6 of 25 reachable before.
+        **No prior is allowed to shorten the list — decided with the user after trying the
+        opposite.** Holding a government office makes somebody a more *probable* referent; it
+        does not make the others wrong, and a surname search is a plausible search for any of
+        them. Used as a filter it dropped the likelier person about as often as not:
+        "Sánchez" kept the prime minister (41 speeches) and threw away Sánchez Serna (59);
+        "Rego" kept the minister with 2 and threw away the deputy with 126; "López" kept
+        Óscar López (4) over Patxi López (35). Speech volume and real search demand fail
+        symmetrically — both pick the wrong Montero. So a prior only ORDERS the candidates
+        (``_by_prominence``); it never removes one.
 
-        Neither is speech volume nor real search demand used, though both look obvious.
-        Both were measured and both pick the wrong Montero: popularity says the busiest
-        bearer of a surname is the one meant, and for a shared surname it simply is not.
+        This is where a query differs from a speech, and why the cues that carry index-time
+        mentions do not transfer: a courtesy form's gender, or a coreference, is evidence
+        from the same text about who is meant. A query carries no evidence at all — only
+        global priors about who is more often meant, which is a ranking concern.
 
-        The office step is skipped entirely when nobody bears the token as a first surname
-        (a bare given name, or a shared second surname). Applying it there was measured and
-        rejected — it produced "Caballero" → Cuerpo Caballero and "Muñoz" → Aagesen Muñoz,
-        people nobody refers to that way."""
+        Nobody bearing the token as a first surname (a bare given name, or a surname everyone
+        here carries second) leaves the whole tie standing, deliberately: narrowing has
+        nothing to say, and the office step that used to run here produced "Caballero" →
+        Cuerpo Caballero and "Muñoz" → Aagesen Muñoz, people nobody refers to that way."""
         if len(tied) < 2:
             result.notes.append(f"speaker: '{raw}' → '{chosen}' ({score})")
             return [chosen]
         pool = [name for name in tied if self._first_surname_match(raw, name)]
-        if len(pool) != 1 and pool:
-            holders = [name for name in pool if self._office_families.get(name)]
-            if len(holders) == 1:
-                pool = holders
-        kept = pool if len(pool) == 1 else (pool or tied)
+        kept = pool if len(pool) == 1 else self._by_prominence(pool or tied)
         result.ambiguous.append(
-            AmbiguousMatch("speaker", raw, chosen, tied, kept=list(kept)))
+            AmbiguousMatch("speaker", raw, chosen, self._by_prominence(tied),
+                           kept=list(kept)))
         if len(kept) == 1:
             result.notes.append(
                 f"speaker: '{raw}' → '{kept[0]}' ({score}, "
@@ -331,6 +333,20 @@ class EntityResolver:
             result.notes.append(
                 f"speaker: '{raw}' names {len(kept)} people — showing all of them")
         return kept
+
+    def _by_prominence(self, names):
+        """``names`` with the office holders first, then alphabetically.
+
+        Ordering ONLY. The filter these names go into is set membership, so this changes no
+        result — it exists because the list is also reported to the client, which offers it
+        as "did you mean" options, and the office holder is the likeliest of several people
+        sharing a surname. Being likelier is the most a prior may do here: it earns a place
+        at the top of the list, never the removal of anybody below it.
+
+        Congress activity is the other half of the same criterion and is deliberately absent:
+        it would need per-speaker speech counts, which nothing has loaded, and the client
+        rendering the list is better placed to refine the order than this is."""
+        return sorted(names, key=lambda name: (not self._office_families.get(name), name))
 
     def _first_surname_match(self, raw, name):
         """Whether ``raw`` names ``name``'s first surname.
