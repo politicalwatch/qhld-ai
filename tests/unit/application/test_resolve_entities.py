@@ -208,13 +208,55 @@ def test_a_first_surname_behind_a_particle_still_counts():
 
 
 def test_first_surname_matching_folds_accents_on_both_sides():
-    # Unit-level on purpose. End to end an unaccented query never gets this far — bare
-    # "Nunez" scores 27 against "Núñez Feijóo, Alberto", well under the 90 threshold — so
-    # this asserts the comparison itself, not a rescue it cannot perform.
     resolver = _resolver(deputies=[])
     assert resolver._first_surname_match("Núñez", "Núñez Feijóo, Alberto")
     assert resolver._first_surname_match("nunez", "Núñez Feijóo, Alberto")
     assert not resolver._first_surname_match("Núñez", "Paniagua Núñez, Miguel Ángel")
+
+
+# --- a name typed without its accents ---------------------------------------
+
+NUNEZ = {"speaker": {"Núñez Feijóo, Alberto", "Núñez González, Noelia",
+                     "Núñez Guijarro, José Enrique", "Sánchez Serna, Javier"}}
+
+
+@pytest.mark.parametrize("typed", ["núñez", "nuñez", "nunez", "Núñez", "NUNEZ"])
+def test_a_surname_resolves_the_same_however_its_accents_are_typed(typed):
+    # The corpus reads accented transcripts; people type names without the accents. Before
+    # folding, "nuñez" scored 29 against "Núñez Feijóo, Alberto" and the query resolved to
+    # NOBODY, while "núñez" scored 100 — the same question answered two different ways.
+    resolver = _resolver(distinct=lambda key: NUNEZ.get(key, set()), deputies=[])
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=[typed]))
+
+    assert r.filters["speaker"] == sorted(
+        {"Núñez Feijóo, Alberto", "Núñez González, Noelia", "Núñez Guijarro, José Enrique"})
+    assert not r.unresolved
+
+
+def test_folding_does_not_make_a_query_reach_an_unrelated_surname():
+    # Folding is meant to add reach to the RIGHT name only: unrelated surnames score in the
+    # 20s either way, so nothing new clears the threshold.
+    resolver = _resolver(distinct=lambda key: NUNEZ.get(key, set()), deputies=[])
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["sanchez"]))
+
+    assert r.filters["speaker"] == "Sánchez Serna, Javier"
+
+
+def test_an_unknown_name_still_resolves_to_nobody():
+    resolver = _resolver(distinct=lambda key: NUNEZ.get(key, set()), deputies=[])
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["xyzabc"]))
+
+    assert "speaker" not in r.filters
+    assert r.blocked
+
+
+def test_a_role_resolves_without_its_accents_too():
+    # Same fuzzy path, so the fix reaches roles as well.
+    resolver = _resolver()
+    r = resolver.resolve(
+        ParsedQuery(semantic_query="x", speaker_title="ministra de economia"))
+
+    assert r.filters["role"] == "Ministra de Economía, Comercio y Empresa"
 
 
 def test_the_tied_pick_is_reproducible_across_processes():

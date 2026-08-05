@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from thefuzz import fuzz, process
+from thefuzz.utils import full_process
 
 from qhld_ai.application.persons_catalog import (
     alias_index,
@@ -541,9 +542,16 @@ class EntityResolver:
         same winner: ``extractOne`` takes ``max``, which keeps the first of equal scores,
         and ``extract`` sorts stably, which leaves that same one first. Rows are indexed
         rather than unpacked because their width depends on the input type (thefuzz
-        yields pairs for a list, triples for a mapping)."""
+        yields pairs for a list, triples for a mapping).
+
+        Scoring runs over accent-folded text (``_fold_for_matching``) so a name typed without
+        its accents still reaches its owner. thefuzz applies the processor to the query and to
+        every choice but still hands back the ORIGINAL choice strings, so everything
+        downstream — ``tied``, the narrowing, the filter — keeps working with real corpus
+        values."""
         ranked = process.extract(
-            raw, choices, scorer=fuzz.token_set_ratio, limit=None) if choices else []
+            raw, choices, scorer=fuzz.token_set_ratio, limit=None,
+            processor=_fold_for_matching) if choices else []
         match = ranked[0] if ranked else None
         if match and match[1] >= threshold:
             if trace:
@@ -632,6 +640,26 @@ def _strip_accents(text: str) -> str:
 
 # Long enough to discriminate, matching the domain's own name-token floor.
 _MIN_NAME_TOKEN = 3
+
+
+def _fold_for_matching(value: str) -> str:
+    """What a query and a corpus value are both reduced to before being scored.
+
+    The corpus spells names properly — it reads accented transcripts — and people type them
+    without the accents. ``token_set_ratio`` compares characters, so that difference alone
+    sank the score below the threshold and the query resolved to NOBODY: "nuñez" scored 29
+    against "Núñez Feijóo, Alberto" and "sanchez" 38 against "Sánchez Pérez-Castejón, Pedro".
+    Folded, both are 100, and the two spellings of a name finally behave identically.
+
+    Safe rather than merely forgiving, both measured: unrelated surnames stay at 24-30 folded,
+    nowhere near the threshold, and NO two values in the speaker or role vocabulary differ only
+    by accent or case (370 and 30 values, 0 collisions) — so folding cannot merge two people.
+
+    Composed with ``full_process`` instead of replacing it, so its lowercasing and punctuation
+    handling still apply. thefuzz's own ``force_ascii=True`` is NOT the shortcut it looks like:
+    it DELETES non-ASCII rather than transliterating, turning "Núñez Feijóo" into "nez feijo"
+    — worse than leaving the accents where they were."""
+    return _strip_accents(full_process(value))
 
 
 def _fold(text: str) -> set[str]:
