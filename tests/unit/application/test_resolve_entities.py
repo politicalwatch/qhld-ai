@@ -551,6 +551,31 @@ def test_mentioned_person_resolves_to_deputy_id(resolver):
     assert any("mentions:" in note for note in r.notes)
 
 
+def test_a_mention_carries_the_name_behind_its_id(resolver):
+    # The filter has to be the id (that is how the payload is keyed), and nobody outside
+    # this package can turn one back into a name — least of all its accents.
+    r = resolver.resolve(ParsedQuery(semantic_query="vivienda", mentioned_persons=["Montero"]))
+    assert r.labels["mentions"] == {"dep-montero": "Montero Cuadrado, María Jesús"}
+
+
+def test_every_mentioned_person_is_named(resolver):
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="x", mentioned_persons=["Montero", "Abascal"]))
+    assert set(r.labels["mentions"]) == set(r.filters["mentions"]["all"])
+
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="x", mentioned_persons=["Montero", "Abascal"], mentions_mode="any"))
+    assert set(r.labels["mentions"]) == set(r.filters["mentions"])
+
+
+def test_a_mention_that_filters_on_nothing_is_not_named(resolver):
+    # Blocked: no mentions filter was emitted, so there is nothing to say back.
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="x", mentioned_persons=["Montero", "Winston Churchill"]))
+    assert "mentions" not in r.filters
+    assert r.labels == {}
+
+
 def test_unresolvable_mentioned_person_blocks(resolver):
     # The corpus is tagged with the same catalog: a person absent from it cannot
     # appear in any payload, so the query is unsatisfiable.

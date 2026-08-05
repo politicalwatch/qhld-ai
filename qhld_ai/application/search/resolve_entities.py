@@ -179,6 +179,12 @@ class Resolution:
     unresolved: list[UnresolvedEntity] = field(default_factory=list)
     # Resolved, but arbitrarily — see AmbiguousMatch. Never affects ``blocked``.
     ambiguous: list[AmbiguousMatch] = field(default_factory=list)
+    # ``{field: {filter value: how to say it}}``, for filter values that mean nothing
+    # outside this package. Mentions filter on person ids ("isabel-diaz-ayuso") because
+    # that is what the payload is keyed by, and only the resolver knows the name behind
+    # one — so it says it here instead of leaving each client to unslug an id and get the
+    # accents wrong. Display only: the filters themselves are untouched.
+    labels: dict = field(default_factory=dict)
 
     @property
     def blocked(self) -> bool:
@@ -403,7 +409,7 @@ class EntityResolver:
             for raw in raws:
                 result.notes.append(f"mentions: '{raw}' ignored — no person catalog")
             return
-        ids, misses = [], []
+        ids, names, misses = [], {}, []
         for raw in raws:
             match = match_person(raw, self._person_index, self._mention_threshold)
             if match.entry:
@@ -411,6 +417,7 @@ class EntityResolver:
                     f"mentions: '{raw}' → '{match.entry.name}' ({match.entry.person_type})")
                 if match.entry.person_id not in ids:
                     ids.append(match.entry.person_id)
+                names[match.entry.person_id] = match.entry.name
             else:
                 misses.append((raw, self._person_suggestion(match)))
         # ``all`` requires every person, so a single miss is unsatisfiable; ``any``
@@ -427,6 +434,9 @@ class EntityResolver:
             result.filters["mentions"] = sorted(ids)
         else:
             result.filters["mentions"] = {"all": sorted(ids)}
+        # Alongside the filter, never without it: the ids are the query, the names are
+        # only how to say them back.
+        result.labels["mentions"] = names
 
     def _resolve_entities(self, result, raws, mode):
         vocab = {v for v in self._distinct("entities") if v}
