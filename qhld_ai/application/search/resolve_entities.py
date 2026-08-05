@@ -91,6 +91,12 @@ _CONSTITUENCY_THRESHOLD = 85
 # "guerra de gaza"), which token_set_ratio scores ~100.
 _ENTITY_THRESHOLD = 90
 
+# The filters that describe the SPEAKER rather than the speech, and so may shorten who a
+# tied surname could mean (``_narrow_speakers``). Everything else a query resolves — a
+# date, a legislature, a language, a mentioned person, a topic — is a property of the
+# speech: it constrains the results, never the identity of the person asked about.
+_PERSON_FILTERS = ("group", "constituency")
+
 # Map the many ways a language can be named (or mis-coded by an LLM: "Gallego",
 # "cat") to the ISO code stored in the payload ``lang``. Payload uses es/ca/gl/eu.
 _LANG_ALIASES = {
@@ -142,11 +148,21 @@ class UnresolvedEntity:
     the query as asked is unsatisfiable and search must return no hits; non-blocking
     entries are members dropped from an any-of list that still has resolved members.
     ``suggestion`` carries the closest sub-threshold candidate (or the tied names of
-    an ambiguous surname), when known."""
+    an ambiguous surname), when known.
+
+    ``reason`` separates the two ways this happens, because they need different words:
+    ``None`` is the ordinary one — nobody answers to that name. ``FILTERED_OUT`` means the
+    name was recognised and everyone carrying it is ruled out by the rest of the query
+    ("Montero de Sumar" — no Montero speaks for Sumar), where saying we could not identify
+    them would be false."""
     field: str
     value: str
     blocking: bool
     suggestion: str | None = None
+    reason: str | None = None
+
+
+FILTERED_OUT = "filtered_out"
 
 
 @dataclass
@@ -195,7 +211,7 @@ class Resolution:
 class EntityResolver:
     def __init__(self, distinct, groups, deputies=None, mention_threshold=90,
                  curated=None, nondeputy_speakers=None, curated_aliases=None,
-                 deputy_profiles=None, speaker_offices=None):
+                 deputy_profiles=None, speaker_offices=None, speakers_under=None):
         """``distinct`` is ``callable(key) -> set`` over the target collection's
         payload; ``groups`` is the list of ``ParliamentaryGroup`` records. ``deputies``
         (the ``Deputy`` catalog) enables resolving mentioned persons; when given, the
@@ -210,8 +226,13 @@ class EntityResolver:
         ``speaker_offices`` is ``[{speaker, role}]`` (``Speeches.distinct_speaker_offices``).
         It does NOT decide anything — it only sorts the candidates reported for a shared
         surname so the office holder is offered first (see ``_by_prominence``). Omit it and
-        the same people resolve, listed alphabetically instead."""
+        the same people resolve, listed alphabetically instead.
+
+        ``speakers_under`` is ``callable({filters}) -> set of speakers`` — who has actually
+        spoken under those filters. Omit it and a tied surname is never narrowed by the group
+        or constituency the query also asked for (see ``_narrow_speakers``)."""
         self._distinct = distinct
+        self._speakers_under = speakers_under
         self._office_families = {}
         for row in speaker_offices or []:
             families = office_families(row.get("role"))
@@ -255,6 +276,8 @@ class EntityResolver:
             self._resolve_lang(result, parsed.lang)
         if parsed.legislature:
             result.filters["legislature"] = parsed.legislature
+        # Last, because a speaker resolves before the group that qualifies them.
+        self._narrow_speakers(result)
         return result
 
     def _resolve_speakers(self, result, raws):
@@ -340,6 +363,89 @@ class EntityResolver:
             result.notes.append(
                 f"speaker: '{raw}' names {len(kept)} people — showing all of them")
         return kept
+
+    def _narrow_speakers(self, result):
+        """Shorten a tied surname to the people who speak under the group or constituency
+        the same query asked for.
+
+        "que ha dicho sánchez del psoe" used to offer the same seven people as "que ha dicho
+        sánchez", five of whom sit in other groups and therefore cannot appear in these
+        results at all — the group filter already excludes them. Nothing was wrong with the
+        results; the page claimed to have understood seven speakers while showing two
+        people's speeches.
+
+        **Only filters that are a property of the PERSON may do this** (``_PERSON_FILTERS``).
+        A date, a legislature, a language, a mentioned person or a topic is a property of the
+        speech: "sánchez en 2024" still means all the Sánchezes, and whether they happened to
+        speak that year is for the results to settle, not for the name.
+
+        This is not the prior that ``_break_speaker_tie`` refuses. An office makes somebody a
+        likelier referent and is never allowed to remove anyone; a group the user typed is
+        something they said, and it removes the people it excludes anyway.
+
+        The rescue below is the one case that changes what a search RETURNS, and it only ever
+        turns nothing into something: when no kept name speaks under the filter but another
+        tied name does, the tie was broken the wrong way. "Montero" keeps Montero Cuadrado on
+        the first-surname rule, so "Montero de GV (EAJ-PNV)" returned zero results while
+        Vaquero Montero — who carries Montero second, and has 56 speeches for that group —
+        was sitting right there in ``tied``. An explicit group outranks the first-surname
+        rule, which exists for when nothing else is known.
+
+        Nobody matching at all makes the query unsatisfiable, and it says so rather than
+        naming a speaker the filter contradicts: "Montero de Sumar" used to report Montero
+        Cuadrado (PSOE) beside `group: GSUMAR`, an interpretation that argues with itself
+        above zero results. The name stops being filtered on and is recorded as
+        ``FILTERED_OUT`` — recognised, then ruled out — which reads differently to a client
+        than a name nobody answers to."""
+        if not self._speakers_under or "speaker" not in result.filters:
+            return
+        where = {key: result.filters[key]
+                 for key in _PERSON_FILTERS if key in result.filters}
+        matches = [match for match in result.ambiguous if match.field == "speaker"]
+        if not (where and matches):
+            return
+
+        present = set(self._speakers_under(where) or ())
+        criteria = " and ".join(where)
+        dropped, added, ruled_out = set(), set(), []
+        for match in matches:
+            narrowed = [name for name in match.kept if name in present]
+            rescued = not narrowed
+            if rescued:
+                narrowed = [name for name in match.tied if name in present]
+            if not narrowed:
+                # Nobody of that name speaks under it. Keeping the tie-break's pick would
+                # claim a speaker the group filter contradicts, so the name stops being
+                # filtered on at all and is reported below as ruled out.
+                dropped |= set(match.kept)
+                match.kept = []
+                ruled_out.append(match)
+                continue
+            if narrowed == match.kept:
+                continue
+            dropped |= set(match.kept) - set(narrowed)
+            added |= set(narrowed) - set(match.kept)
+            result.notes.append(
+                f"speaker: '{match.value}' → {len(narrowed)} of "
+                f"{len(match.tied) if rescued else len(match.kept)} "
+                f"{'sharing the name' if rescued else 'kept'} speak for the "
+                f"{criteria} asked for")
+            match.kept = narrowed
+
+        if not (dropped or added):
+            return
+        current = result.filters["speaker"]
+        names = [current] if isinstance(current, str) else list(current)
+        survivors = [name for name in names if name not in dropped] + sorted(added)
+        if survivors:
+            _set_filter(result, "speaker", survivors)
+        else:
+            del result.filters["speaker"]
+        for match in ruled_out:
+            # Blocking only when no speaker is left, as ``_resolve_speakers`` does: several
+            # speakers are an any-of, and the ones that survive still answer.
+            _record_unresolved(result, "speaker", match.value, blocking=not survivors,
+                               reason=FILTERED_OUT)
 
     def _by_prominence(self, names):
         """``names`` with the office holders first, then alphabetically.
@@ -616,13 +722,18 @@ class EntityResolver:
             result.notes.append(f"date: {bounds}")
 
 
-def _record_unresolved(result, field_name, raw, blocking, suggestion=None):
+def _record_unresolved(result, field_name, raw, blocking, suggestion=None, reason=None):
     """Record one failed value both machine-readably (``unresolved``) and in the
     human trace (``notes``)."""
-    result.unresolved.append(UnresolvedEntity(field_name, raw, blocking, suggestion))
+    result.unresolved.append(
+        UnresolvedEntity(field_name, raw, blocking, suggestion, reason))
     hint = f" (closest: {suggestion})" if suggestion else ""
     outcome = "no results" if blocking else "dropped from any-of"
-    result.notes.append(f"{field_name}: '{raw}' unresolved{hint} — {outcome}")
+    # The trace must not say "unresolved" about a name that resolved perfectly well and was
+    # then excluded by the rest of the query.
+    state = ("ruled out by the rest of the query" if reason == FILTERED_OUT
+             else "unresolved")
+    result.notes.append(f"{field_name}: '{raw}' {state}{hint} — {outcome}")
 
 
 def _set_filter(result, key, matched):

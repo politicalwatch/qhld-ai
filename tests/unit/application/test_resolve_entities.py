@@ -119,6 +119,158 @@ def test_a_shared_surname_keeps_every_bearer_instead_of_guessing():
     assert any("names 2 people" in note for note in r.notes)
 
 
+# Narrowing a tie by the group/constituency the same query asked for. The facets are the
+# real ones: "Montero" is carried by one bearer per group, which is exactly what makes the
+# group the only thing that can tell them apart.
+MONTEROS = {
+    "Montero Cuadrado, María Jesús": {"group": "GS", "constituency": "Sevilla"},
+    "Vaquero Montero, Maribel": {"group": "GV (EAJ-PNV)", "constituency": "Bizkaia"},
+}
+
+SANCHEZ = {
+    "Sánchez Pérez-Castejón, Pedro": {"group": "GS", "constituency": "Madrid"},
+    "Sánchez Díaz, María Carmen": {"group": "GS", "constituency": "Cádiz"},
+    "Sánchez Serna, Javier": {"group": "GMx", "constituency": "Murcia"},
+}
+
+WIDER_GROUPS = GROUPS + [
+    SimpleNamespace(name="Grupo Parlamentario Vasco (EAJ-PNV)", shortname="GV (EAJ-PNV)",
+                    parties=["EAJ-PNV"]),
+    SimpleNamespace(name="Grupo Parlamentario Plurinacional SUMAR", shortname="GSUMAR",
+                    parties=["SUMAR"]),
+]
+
+
+def _narrowing_resolver(facets, calls=None):
+    """A resolver whose corpus is ``facets`` — the speakers, plus who each of them speaks
+    for, which is what the store answers in production."""
+    def speakers_under(where):
+        if calls is not None:
+            calls.append(where)
+        return {name for name, facet in facets.items()
+                if all(facet.get(key) == value for key, value in where.items())}
+
+    corpus = {"speaker": set(facets),
+              "constituency": {facet["constituency"] for facet in facets.values()}}
+    return _resolver(distinct=lambda key: corpus.get(key, set()), deputies=[],
+                     groups=WIDER_GROUPS, speakers_under=speakers_under)
+
+
+def test_a_tied_surname_offers_only_the_people_of_the_group_asked_for():
+    # "que ha dicho sánchez del psoe" used to offer the same seven people as "que ha dicho
+    # sánchez" — five of them in other groups, so they could not appear in these results at
+    # all. The results were right; the interpretation shown to the user was not.
+    r = _narrowing_resolver(SANCHEZ).resolve(ParsedQuery(
+        semantic_query="x", speakers=["Sánchez"], groups_or_parties=["PSOE"]))
+
+    assert r.ambiguous[0].kept == [
+        "Sánchez Díaz, María Carmen", "Sánchez Pérez-Castejón, Pedro"]
+    assert r.filters["speaker"] == [
+        "Sánchez Díaz, María Carmen", "Sánchez Pérez-Castejón, Pedro"]
+    assert any("speak for the group asked for" in note for note in r.notes)
+
+
+def test_a_constituency_narrows_the_same_way():
+    r = _narrowing_resolver(SANCHEZ).resolve(ParsedQuery(
+        semantic_query="x", speakers=["Sánchez"], constituencies=["Cádiz"]))
+
+    # Down to one person, so the search stops reporting an ambiguity the user has to settle.
+    assert r.ambiguous[0].kept == ["Sánchez Díaz, María Carmen"]
+    assert r.filters["speaker"] == "Sánchez Díaz, María Carmen"
+
+
+def test_a_group_rescues_a_tie_that_was_broken_the_wrong_way():
+    # "Montero" keeps Montero Cuadrado on the first-surname rule, so "Montero de EAJ-PNV"
+    # returned ZERO results while Vaquero Montero — who carries Montero second and speaks
+    # for that group — sat in the tie. A group the user typed outranks a rule that exists
+    # for when nothing else is known, so the second-surname bearer is re-admitted.
+    r = _narrowing_resolver(MONTEROS).resolve(ParsedQuery(
+        semantic_query="x", speakers=["Montero"], groups_or_parties=["EAJ-PNV"]))
+
+    assert r.filters["speaker"] == "Vaquero Montero, Maribel"
+    assert r.ambiguous[0].kept == ["Vaquero Montero, Maribel"]
+
+
+def test_a_group_nobody_speaks_for_makes_the_query_unsatisfiable():
+    # No Montero speaks for Sumar. Reporting Montero Cuadrado (PSOE) beside group GSUMAR
+    # would be an interpretation that argues with itself, so the name is not filtered on
+    # and the search says the query cannot be satisfied.
+    r = _narrowing_resolver(MONTEROS).resolve(ParsedQuery(
+        semantic_query="x", speakers=["Montero"], groups_or_parties=["SUMAR"]))
+
+    assert "speaker" not in r.filters
+    assert r.filters["group"] == "GSUMAR"
+    assert r.blocked
+    entity = r.unresolved[0]
+    assert (entity.field, entity.value, entity.reason) == (
+        "speaker", "Montero", "filtered_out")
+    # Not "we could not identify Montero" — we did; she is ruled out.
+    assert any("ruled out by the rest of the query" in note for note in r.notes)
+    # Nothing was filtered on, so no narrowing options are offered either.
+    assert r.ambiguous[0].kept == []
+
+
+def test_a_ruled_out_name_does_not_block_a_search_that_names_somebody_else():
+    # Speakers are an any-of: one name ruled out by the group leaves the other answering.
+    facets = dict(MONTEROS)
+    facets["Sánchez Serna, Javier"] = {"group": "GMx", "constituency": "Murcia"}
+    r = _narrowing_resolver(facets).resolve(ParsedQuery(
+        semantic_query="x", speakers=["Montero", "Sánchez Serna, Javier"],
+        groups_or_parties=["PODEMOS"]))  # a Mixto party
+
+    assert r.filters["speaker"] == "Sánchez Serna, Javier"
+    assert not r.blocked
+    assert [(e.value, e.blocking, e.reason) for e in r.unresolved] == [
+        ("Montero", False, "filtered_out")]
+
+
+def test_a_name_nobody_answers_to_still_reports_no_reason():
+    # The ordinary failure keeps meaning what it meant, so a client can tell them apart.
+    r = _narrowing_resolver(MONTEROS).resolve(ParsedQuery(
+        semantic_query="x", speakers=["Winston Churchill"]))
+
+    assert r.blocked
+    assert r.unresolved[0].reason is None
+
+
+def test_a_property_of_the_speech_never_narrows_the_name():
+    # "sánchez en 2024" still means every Sánchez: whether they happened to speak that year
+    # is for the results to settle. The corpus is not even asked.
+    calls = []
+    r = _narrowing_resolver(SANCHEZ, calls).resolve(ParsedQuery(
+        semantic_query="x", speakers=["Sánchez"], date_from="2024-01-01",
+        date_to="2024-12-31", legislature="15", lang="es"))
+
+    assert r.ambiguous[0].kept == sorted(SANCHEZ)
+    assert r.filters["speaker"] == sorted(SANCHEZ)
+    assert calls == []
+
+
+def test_a_name_that_never_tied_is_not_looked_up_at_all():
+    # Full name, one bearer, nothing to narrow — the group is just a filter. Guarded
+    # rather than merely harmless: this is the common shape, and it must not pay for a
+    # corpus round trip.
+    calls = []
+    r = _narrowing_resolver(SANCHEZ, calls).resolve(ParsedQuery(
+        semantic_query="x", speakers=["Sánchez Serna, Javier"],
+        groups_or_parties=["PSOE"]))
+
+    assert r.filters["speaker"] == "Sánchez Serna, Javier"
+    assert r.ambiguous == []
+    assert calls == []
+
+
+def test_without_the_corpus_lookup_the_tie_stands_as_before():
+    # Nothing injected (an embedder-less caller, most of these tests): the group still
+    # filters the results, it just does not shorten the list of people.
+    resolver = _resolver(distinct=lambda key: {"speaker": set(SANCHEZ)}.get(key, set()),
+                         deputies=[], groups=WIDER_GROUPS)
+    r = resolver.resolve(ParsedQuery(
+        semantic_query="x", speakers=["Sánchez"], groups_or_parties=["PSOE"]))
+
+    assert r.ambiguous[0].kept == sorted(SANCHEZ)
+
+
 def test_a_tied_surname_is_settled_by_its_first_bearer():
     # "Bravo" is Juan Bravo, not Aitor Esteban Bravo: a surname names whoever carries it
     # FIRST, so this tie is breakable on evidence and no fail-open is needed.

@@ -60,9 +60,13 @@ class VectorStorePort(Protocol):
         """Delete every point whose payload ``key`` equals ``value``."""
         ...
 
-    def distinct_values(self, name: str, key: str) -> set:
+    def distinct_values(self, name: str, key: str, where: dict | None = None) -> set:
         """The set of distinct values the payload ``key`` takes across the
-        collection — used to skip already-indexed items on an incremental run."""
+        collection — used to skip already-indexed items on an incremental run.
+
+        ``where`` restricts it to the points matching those filters (same shape as a
+        search's), answering "which values does this key take among THESE points" —
+        which speakers have spoken for a group, say."""
         ...
 
     def search(

@@ -142,6 +142,27 @@ def test_distinct_values_empty_collection(adapter):
     assert adapter.distinct_values("c", "speech_id") == set()
 
 
+def test_distinct_values_can_be_restricted_to_matching_points(adapter):
+    # "Which speakers have spoken for this group" — what narrows a tied surname to the
+    # people the rest of the query leaves possible.
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [
+        _point({"speaker": "Sánchez Díaz, María Carmen", "group": "GS", "date": 20240110}),
+        _point({"speaker": "Sánchez Serna, Javier", "group": "GMx", "date": 20240110}),
+        _point({"speaker": "Vaquero Montero, Maribel", "group": "GV", "date": 20250315}),
+    ])
+
+    assert adapter.distinct_values("c", "speaker", {"group": "GS"}) == {
+        "Sánchez Díaz, María Carmen"}
+    # The same filter shapes a search takes — a range here.
+    assert adapter.distinct_values("c", "speaker", {"date": {"gte": 20250101}}) == {
+        "Vaquero Montero, Maribel"}
+    # A filter nobody matches is an empty answer, not everybody.
+    assert adapter.distinct_values("c", "speaker", {"group": "GSUMAR"}) == set()
+    # And no filter still means the whole collection.
+    assert len(adapter.distinct_values("c", "speaker")) == 3
+
+
 def test_distinct_values_flattens_list_payloads(adapter):
     # A list-valued key (entities, mentions) yields the member vocabulary.
     adapter.ensure_collection("c", 3)

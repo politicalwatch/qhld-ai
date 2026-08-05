@@ -217,12 +217,14 @@ class QdrantAdapter(VectorStorePort):
             points_selector=models.Filter(must=self._conditions(key, value)),
         ))
 
-    def distinct_values(self, name: str, key: str) -> set:
+    def distinct_values(self, name: str, key: str, where: dict | None = None) -> set:
         values = set()
         offset = None
+        scroll_filter = self._query_filter(where)
         while True:
             records, offset = self._retry(lambda: self.client.scroll(
                 collection_name=name,
+                scroll_filter=scroll_filter,
                 with_payload=[key],
                 with_vectors=False,
                 limit=1000,

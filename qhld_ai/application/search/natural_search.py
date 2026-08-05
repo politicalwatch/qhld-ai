@@ -104,6 +104,12 @@ class NaturalSearchSpeeches:
             # Who has spoken under a government office, which is what decides a tied
             # bare surname ("Montero"). Read once per resolver, not per query.
             speaker_offices=Speeches.distinct_speaker_offices(),
+            # Who has spoken under a given group/constituency, asked per query — it
+            # depends on what that query resolved, so unlike the offices above it cannot
+            # be read once. Only a query that both ties a surname and names one of those
+            # pays for it.
+            speakers_under=lambda where: self.search.store.distinct_values(
+                collection, "speaker", where),
             mention_threshold=self.settings.mention_match_threshold)
 
     def resolver(self) -> EntityResolver:
