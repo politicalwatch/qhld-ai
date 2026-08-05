@@ -68,7 +68,13 @@ from qhld_ai.application.persons_catalog import (
 )
 from qhld_ai.domain.entities import normalize_entity
 from qhld_ai.domain.ports.query_parser import ParsedQuery
-from qhld_ai.domain.mentions import PersonMatch, match_person, normalize_span
+from qhld_ai.domain.mentions import (
+    PersonMatch,
+    first_surname_tokens,
+    match_person,
+    normalize_span,
+    office_families,
+)
 
 # token_set_ratio scores a subset match ~100 ("María Jesús Montero" ⊆ "Montero
 # Cuadrado, María Jesús", or a surname-only "Montero") while an unrelated name
@@ -144,19 +150,23 @@ class UnresolvedEntity:
 
 @dataclass
 class AmbiguousMatch:
-    """A value that resolved, but only because a tie was broken arbitrarily.
+    """A value several catalog names answered to, and what was done about it.
 
-    Several catalog names scored identically and one was picked by list order, so the
-    query DID resolve — ``chosen`` is in ``filters`` and ``notes`` records it as a
-    success. That is the difference from ``UnresolvedEntity``: nothing failed, and the
-    caller has no reason to treat the search as degraded. It is recorded because the
-    choice is not reproducible (the vocabulary is a set, so its order can differ
-    between processes) and because which names collide is worth knowing: some of these
+    ``tied`` is everyone who scored identically; ``kept`` is who ended up in ``filters``.
+    When ``kept`` holds one name the tie was broken on evidence (a first surname, an
+    office); when it holds several the resolver declined to guess and filtered on all of
+    them, so the search stays open and ranking decides what surfaces first. ``chosen`` is
+    who merely ranked first — kept because it is what a single-value implementation would
+    have picked, which is exactly the information a curation round wants.
+
+    Distinct from ``UnresolvedEntity``: nothing failed here, and the search is not
+    degraded. It is recorded because which names collide is worth knowing — some of these
     want a disambiguation rule rather than a new catalog entry."""
     field: str
     value: str
     chosen: str
     tied: list[str]
+    kept: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -178,7 +188,7 @@ class Resolution:
 class EntityResolver:
     def __init__(self, distinct, groups, deputies=None, mention_threshold=90,
                  curated=None, nondeputy_speakers=None, curated_aliases=None,
-                 deputy_profiles=None):
+                 deputy_profiles=None, speaker_offices=None):
         """``distinct`` is ``callable(key) -> set`` over the target collection's
         payload; ``groups`` is the list of ``ParliamentaryGroup`` records. ``deputies``
         (the ``Deputy`` catalog) enables resolving mentioned persons; when given, the
@@ -188,8 +198,18 @@ class EntityResolver:
         /``deputy_profiles`` may be injected (tests); otherwise they are read from the
         data files / ``Speeches``. Omit ``deputies`` => mentioned-person queries are left
         unfiltered, but curated deputy aliases still serve the speaker path, which needs
-        no catalog."""
+        no catalog.
+
+        ``speaker_offices`` is ``[{speaker, role}]`` (``Speeches.distinct_speaker_offices``)
+        and breaks a tied surname in favour of the office holder — the only thing that
+        distinguishes the minister everyone means from the backbencher who shares her
+        name. Omit it and that step simply never fires, leaving the tie to fail open."""
         self._distinct = distinct
+        self._office_families = {}
+        for row in speaker_offices or []:
+            families = office_families(row.get("role"))
+            if row.get("speaker") and families:
+                self._office_families.setdefault(row["speaker"], set()).update(families)
         if curated_aliases is None:
             curated_aliases = load_curated_group_aliases()
         if deputy_profiles is None:
@@ -231,28 +251,100 @@ class EntityResolver:
         return result
 
     def _resolve_speakers(self, result, raws):
-        choices = [v for v in self._distinct("speaker") if v]
+        # Sorted, not set order: several speakers tie on a bare surname and the winner
+        # used to depend on string hashing, so the same query answered differently after
+        # a restart. Sorting is not a tie-break — see ``_break_speaker_tie`` — it only
+        # makes whatever happens reproducible.
+        choices = sorted(v for v in self._distinct("speaker") if v)
         vocab = _speaker_vocab(choices) if self._alias_index else {}
         matched, misses = [], []
         for raw in raws:
             # A curated public name ("Tesh Sidi") shares no token with the official
             # catalog name, so the fuzzy match below can never reach it; try the
             # alias map first.
-            value, suggestion = self._alias_speaker(raw, vocab), None
-            if value:
-                result.notes.append(f"speaker: '{raw}' → '{value}' (curated alias)")
+            alias = self._alias_speaker(raw, vocab)
+            if alias:
+                result.notes.append(f"speaker: '{raw}' → '{alias}' (curated alias)")
+                kept = [alias]
             else:
-                value, suggestion = self._fuzzy_match(
-                    result, "speaker", raw, choices, _SPEAKER_THRESHOLD)
-            if value:
+                value, suggestion, tied, score = self._fuzzy_match(
+                    result, "speaker", raw, choices, _SPEAKER_THRESHOLD, trace=False)
+                if not value:
+                    misses.append((raw, suggestion))
+                    continue
+                kept = self._break_speaker_tie(result, raw, value, tied, score)
+            for value in kept:
                 if value not in matched:
                     matched.append(value)
-            else:
-                misses.append((raw, suggestion))
         for raw, suggestion in misses:
             _record_unresolved(result, "speaker", raw, blocking=not matched,
                                suggestion=suggestion)
         _set_filter(result, "speaker", matched)
+
+    def _break_speaker_tie(self, result, raw, chosen, tied, score):
+        """The speaker value(s) to filter on — one when the tie can be broken on
+        evidence, all of them when it cannot.
+
+        The evidence, in order:
+
+        1. **First surname.** Spanish practice is to name somebody by their first
+           surname, so "Bravo" is Juan Bravo, not Aitor Esteban Bravo. Measured to
+           settle 33 of the corpus's 96 tied surnames on its own.
+        2. **Government office**, but only *within* the first-surname pool. Measured to
+           settle 8 more, and it is what sends "Montero" to the finance minister rather
+           than to the deputy who merely shares her second surname.
+
+        What is deliberately NOT done is guess when neither applies. The pick used to be
+        a hard Qdrant filter, so a wrong guess returned **zero results** — indistinguishable
+        to the user from "we have no coverage of her". Filtering on every tied candidate
+        instead keeps the search open and lets the topic decide what surfaces first, which
+        is the signal the resolver never had: measured over the real search stack, the
+        intended person came back top-ranked in 20 of 25 cases and was present in 22,
+        against roughly 7.6 of 25 reachable before.
+
+        Neither is speech volume nor real search demand used, though both look obvious.
+        Both were measured and both pick the wrong Montero: popularity says the busiest
+        bearer of a surname is the one meant, and for a shared surname it simply is not.
+
+        The office step is skipped entirely when nobody bears the token as a first surname
+        (a bare given name, or a shared second surname). Applying it there was measured and
+        rejected — it produced "Caballero" → Cuerpo Caballero and "Muñoz" → Aagesen Muñoz,
+        people nobody refers to that way."""
+        if len(tied) < 2:
+            result.notes.append(f"speaker: '{raw}' → '{chosen}' ({score})")
+            return [chosen]
+        pool = [name for name in tied if self._first_surname_match(raw, name)]
+        if len(pool) != 1 and pool:
+            holders = [name for name in pool if self._office_families.get(name)]
+            if len(holders) == 1:
+                pool = holders
+        kept = pool if len(pool) == 1 else (pool or tied)
+        result.ambiguous.append(
+            AmbiguousMatch("speaker", raw, chosen, tied, kept=list(kept)))
+        if len(kept) == 1:
+            result.notes.append(
+                f"speaker: '{raw}' → '{kept[0]}' ({score}, "
+                f"of {len(tied)} sharing the name)")
+        else:
+            # Said plainly because this line is shown to the user as a chip: the results
+            # are everybody's, not one person's, and no choice was made on their behalf.
+            result.notes.append(
+                f"speaker: '{raw}' names {len(kept)} people — showing all of them")
+        return kept
+
+    def _first_surname_match(self, raw, name):
+        """Whether ``raw`` names ``name``'s first surname.
+
+        Accents are folded on both sides here rather than in the domain helper, because
+        absorbing query drift is this layer's job (the same reason the backend folds them
+        before keying a query gap). Defensive rather than load-bearing, though: a tie needs
+        a ~100 fuzzy score to exist at all, and an unaccented query never gets one — bare
+        "Nunez" scores 27 against "Núñez Feijóo, Alberto" and is unresolved long before it
+        reaches here. Making accented names reachable from an unaccented query is a
+        separate, larger gap in ``_fuzzy_match``'s threshold, not something this can fix."""
+        return bool(_fold(raw) & {_strip_accents(token)
+                                  for token in first_surname_tokens(
+                                      name, skip_particles=True)})
 
     def _alias_speaker(self, raw, vocab):
         """The corpus ``speaker`` value a curated public name stands for ("Tesh Sidi",
@@ -273,11 +365,16 @@ class EntityResolver:
         return vocab.get(normalize_span(match.entry.name)) if match.entry else None
 
     def _resolve_role(self, result, raw):
-        choices = [v for v in self._distinct("role") if v]
-        value, suggestion = self._fuzzy_match(
+        choices = sorted(v for v in self._distinct("role") if v)
+        value, suggestion, tied, _score = self._fuzzy_match(
             result, "role", raw, choices, _ROLE_THRESHOLD)
         if value:
             result.filters["role"] = value
+            # Unlike a speaker, a role has no first surname and no office to weigh, so a
+            # tie here is only reported, never broken.
+            if len(tied) > 1:
+                result.ambiguous.append(
+                    AmbiguousMatch("role", raw, value, tied, kept=[value]))
         else:
             _record_unresolved(result, "role", raw, blocking=True,
                                suggestion=suggestion)
@@ -410,17 +507,19 @@ class EntityResolver:
             _record_unresolved(result, "lang", raw, blocking=True)
 
     @staticmethod
-    def _fuzzy_match(result, payload_key, raw, choices, threshold):
-        """Best fuzzy match for one raw value, traced in ``notes`` when it clears
-        ``threshold``; otherwise ``(None, suggestion)`` with the best sub-threshold
-        candidate for the caller to report.
+    def _fuzzy_match(result, payload_key, raw, choices, threshold, trace=True):
+        """Best fuzzy match for one raw value, plus everyone who tied with it.
 
-        A win shared by several choices is additionally recorded on
-        ``result.ambiguous``: ``token_set_ratio`` scores a bare surname 100 against
-        everyone who carries it, so "Rueda" ties every Rueda in the vocabulary and which
-        one wins is decided by list order — and the vocabularies here come from sets, so
-        that order is not stable across processes. The pick itself is unchanged; it is
-        only no longer silent.
+        Returns ``(value, suggestion, tied, score)`` — ``value`` is ``None`` below
+        ``threshold`` and ``suggestion`` then names the best sub-threshold candidate for the
+        caller to report. ``tied`` is every choice that scored the same as the winner, so a
+        caller that knows how to break the tie can (see ``_resolve_speakers``);
+        ``trace=False`` lets such a caller write its own ``notes`` line once it has decided,
+        which is why ``score`` comes back too — the trace quotes it.
+
+        ``token_set_ratio`` scores a bare surname 100 against everyone who carries it, so
+        "Rueda" ties every Rueda in the vocabulary. Recording the tie is left to the
+        caller because only the caller knows whether it is breakable.
 
         ``extract`` rather than ``extractOne`` so the tie is visible, and it picks the
         same winner: ``extractOne`` takes ``max``, which keeps the first of equal scores,
@@ -431,13 +530,11 @@ class EntityResolver:
             raw, choices, scorer=fuzz.token_set_ratio, limit=None) if choices else []
         match = ranked[0] if ranked else None
         if match and match[1] >= threshold:
-            result.notes.append(f"{payload_key}: '{raw}' → '{match[0]}' ({match[1]})")
+            if trace:
+                result.notes.append(f"{payload_key}: '{raw}' → '{match[0]}' ({match[1]})")
             tied = [row[0] for row in ranked if row[1] == match[1]]
-            if len(tied) > 1:
-                result.ambiguous.append(
-                    AmbiguousMatch(payload_key, raw, match[0], tied))
-            return match[0], None
-        return None, (f"'{match[0]}' ({match[1]})" if match else None)
+            return match[0], None, tied, match[1]
+        return None, (f"'{match[0]}' ({match[1]})" if match else None), [], None
 
     def _resolve_groups(self, result, raws):
         matched, misses = [], []
@@ -515,6 +612,19 @@ def _speaker_vocab(choices):
 def _strip_accents(text: str) -> str:
     return "".join(
         c for c in unicodedata.normalize("NFD", text) if not unicodedata.combining(c))
+
+
+# Long enough to discriminate, matching the domain's own name-token floor.
+_MIN_NAME_TOKEN = 3
+
+
+def _fold(text: str) -> set[str]:
+    """Accent-folded name tokens of a typed value — the query-side counterpart of
+    ``first_surname_tokens``. ``normalize_span`` first, so "el señor Montero" and
+    "Montero" fold alike."""
+    return {_strip_accents(token)
+            for token in re.split(r"[\s-]+", normalize_span(text))
+            if len(token) >= _MIN_NAME_TOKEN}
 
 
 def _fold_plural(token: str) -> str:

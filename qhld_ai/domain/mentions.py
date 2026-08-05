@@ -50,6 +50,10 @@ _HONORIFICS = {
 }
 _PUNCT_RE = re.compile(r"[^\w\s-]", re.UNICODE)
 _MIN_LEN = 3
+# Words a Spanish surname can open with that name nobody on their own. Only the ones
+# long enough to survive ``_tokens`` need listing — "de", "la", "el", "y" are already
+# below _MIN_LEN and drop out by themselves.
+_NAME_PARTICLES = frozenset({"del", "las", "los", "van", "der", "dos", "das"})
 
 # The gendered half of the same courtesy vocabulary. ``normalize_span`` throws these
 # away before matching, but the courtesy form agrees in gender with the person named,
@@ -130,12 +134,26 @@ def _tokens(text: str) -> set[str]:
     return {t for t in re.split(r"[\s-]+", text.lower()) if len(t) >= _MIN_LEN}
 
 
-def _first_surname_tokens(name: str) -> set[str]:
+def first_surname_tokens(name: str, *, skip_particles: bool = False) -> set[str]:
     """The tokens of a deputy's FIRST surname (the first whitespace element before the
     comma; hyphenated compounds like "Grande-Marlaska" split into both parts) — the
-    core of their identity, used to tell a real mention from a homonym."""
+    core of their identity, used to tell a real mention from a homonym.
+
+    ``skip_particles`` steps over the nobiliary/locative words a surname can open with,
+    so "Del Valle Rodríguez" yields ``valle`` and "De los Santos González" yields
+    ``santos`` instead of ``del`` and nothing at all. Callers that resolve a *query*
+    want this: someone typing "Valle" means Del Valle, and the particle is not the part
+    of the name anybody says.
+
+    Off by default because the mentions path is calibrated without it and turning it on
+    there moves span resolution — a change that has to be scored against the gold set,
+    not assumed. See ``resolve_entities._first_surname_match`` for the query side."""
     surname_part = name.partition(",")[0]
-    first = surname_part.split()[0] if surname_part.split() else ""
+    words = surname_part.split()
+    if skip_particles:
+        words = [w for w in words
+                 if w.lower() not in _NAME_PARTICLES and len(w) >= _MIN_LEN] or words
+    first = words[0] if words else ""
     return _tokens(first)
 
 
@@ -280,7 +298,7 @@ def _names_a_surname(norm: str, tied: list[PersonEntry]) -> bool:
     name is Amador). Measured on the gold set: without this, "Alberto" resolves to Fabra
     Part, Alberto — a false positive."""
     span_tokens = _tokens(norm)
-    return any(span_tokens & _first_surname_tokens(e.name) for e in tied)
+    return any(span_tokens & first_surname_tokens(e.name) for e in tied)
 
 
 def _name_keys(name: str) -> set[str]:
@@ -464,7 +482,7 @@ def _break_tie(norm: str, tied: list[PersonEntry]) -> list[PersonEntry]:
     Returns the surviving candidates; a still-tied result (e.g. two deputies sharing a
     first surname) is left for the caller to drop as genuinely ambiguous."""
     span_tokens = _tokens(norm)
-    first = [e for e in tied if span_tokens & _first_surname_tokens(e.name)]
+    first = [e for e in tied if span_tokens & first_surname_tokens(e.name)]
     candidates = first if first else tied
     if len(candidates) == 1:
         return candidates
@@ -549,7 +567,7 @@ def _match_one(norm: str, index: list[PersonEntry], threshold: int,
         # hijack a bare "López" tie via his second surname).
         span_tokens = _tokens(norm)
         named_override = any(
-            e.overrides_deputy and (_first_surname_tokens(e.name) & span_tokens)
+            e.overrides_deputy and (first_surname_tokens(e.name) & span_tokens)
             for e in tied)
         if named_override:
             # A famous non-deputy tied with the deputy who merely shares the surname
@@ -605,7 +623,7 @@ def _is_excluded(norm: str, entry: PersonEntry, excluded: frozenset[str]) -> boo
     span_tokens = _tokens(norm)
     if not (span_tokens & excluded):
         return False
-    first = _first_surname_tokens(entry.name)
+    first = first_surname_tokens(entry.name)
     if first & excluded:
         return True
     return not (span_tokens & first)

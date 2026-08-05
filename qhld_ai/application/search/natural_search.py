@@ -93,6 +93,7 @@ class NaturalSearchSpeeches:
         (matching the payload ``mentions`` list)."""
         from tipi_data.repositories.deputies import Deputies
         from tipi_data.repositories.parliamentarygroups import ParliamentaryGroups
+        from tipi_data.repositories.speeches import Speeches
 
         dim = len(self.search.embedder.embed_query("probe"))
         collection = collection_name(self.settings, dim)
@@ -100,6 +101,9 @@ class NaturalSearchSpeeches:
             distinct=lambda key: self.search.store.distinct_values(collection, key),
             groups=ParliamentaryGroups.get_all(),
             deputies=Deputies.get_all(),
+            # Who has spoken under a government office, which is what decides a tied
+            # bare surname ("Montero"). Read once per resolver, not per query.
+            speaker_offices=Speeches.distinct_speaker_offices(),
             mention_threshold=self.settings.mention_match_threshold)
 
     def resolver(self) -> EntityResolver:

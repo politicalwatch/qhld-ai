@@ -17,6 +17,7 @@ from qhld_ai.domain.mentions import (
     build_person_index,
     build_surname_gazetteer,
     context_excluded_surnames,
+    first_surname_tokens,
     make_person_entry,
     match_person,
     normalize_span,
@@ -271,6 +272,33 @@ def test_tie_broken_by_exact_token_order():
 def test_ambiguous_shared_first_surname_still_drops():
     # Two deputies hold "Muñoz" as their first surname → genuinely ambiguous → dropped.
     assert resolve_mentions(["Muñoz"], INDEX_TIE, 90) == []
+
+
+# --- first-surname tokens, and the particles the query side steps over ------
+
+def test_first_surname_tokens_splits_a_hyphenated_compound():
+    assert first_surname_tokens("Sánchez Pérez-Castejón, Pedro") == {"sánchez"}
+    assert first_surname_tokens("Grande-Marlaska Gómez, Fernando") == {
+        "grande", "marlaska"}
+
+
+def test_first_surname_tokens_keeps_the_particle_by_default():
+    # The mentions path is calibrated on this behaviour, so the default must not move:
+    # "Del Valle" reads as "del" and "De los Santos" yields nothing at all.
+    assert first_surname_tokens("Del Valle Rodríguez, Emilio Jesús") == {"del"}
+    assert first_surname_tokens("De los Santos González, Jaime Miguel") == set()
+
+
+def test_first_surname_tokens_can_step_over_particles():
+    # What the query side needs: the particle is not the part of the name anybody says,
+    # so somebody typing "Valle" or "Santos" is naming these two.
+    assert first_surname_tokens(
+        "Del Valle Rodríguez, Emilio Jesús", skip_particles=True) == {"valle"}
+    assert first_surname_tokens(
+        "De los Santos González, Jaime Miguel", skip_particles=True) == {"santos"}
+    # unchanged where there is no particle to step over
+    assert first_surname_tokens(
+        "Bravo Baena, Juan", skip_particles=True) == {"bravo"}
 
 
 # --- resolve_person (query side) -------------------------------------------

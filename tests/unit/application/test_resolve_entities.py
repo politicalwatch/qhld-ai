@@ -100,21 +100,96 @@ def test_partially_resolved_speakers_keep_the_resolved_one(resolver):
 COLLIDING = {"speaker": {"Rueda Perelló, Patricia", "Rueda Pérez, Juan Carlos"}}
 
 
-def test_a_shared_surname_resolves_but_is_recorded_as_ambiguous():
-    # token_set_ratio scores a bare surname 100 against everyone carrying it, so both
-    # Ruedas tie and the winner is decided by the vocabulary's (set) iteration order.
-    # The query still resolves — nothing here is unsatisfiable — but WHICH Rueda is
-    # arbitrary, so it must not pass as a clean success.
+def test_a_shared_surname_keeps_every_bearer_instead_of_guessing():
+    # Both Ruedas bear it as a FIRST surname and neither holds an office, so nothing
+    # distinguishes them. Guessing one would make it a hard filter and return zero
+    # results whenever the guess was wrong — indistinguishable from having no coverage.
+    # So the filter keeps both and lets ranking decide what surfaces first.
     resolver = _resolver(distinct=lambda key: COLLIDING.get(key, set()), deputies=[])
     r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Rueda"]))
 
-    assert r.filters["speaker"] in COLLIDING["speaker"]
+    assert r.filters["speaker"] == sorted(COLLIDING["speaker"])
     assert not r.blocked and not r.unresolved
     assert len(r.ambiguous) == 1
     match = r.ambiguous[0]
     assert (match.field, match.value) == ("speaker", "Rueda")
-    assert match.chosen == r.filters["speaker"]
     assert sorted(match.tied) == sorted(COLLIDING["speaker"])
+    assert sorted(match.kept) == sorted(COLLIDING["speaker"])
+    # and the trace says so, because it is shown to the user as a chip
+    assert any("names 2 people" in note for note in r.notes)
+
+
+def test_a_tied_surname_is_settled_by_its_first_bearer():
+    # "Bravo" is Juan Bravo, not Aitor Esteban Bravo: a surname names whoever carries it
+    # FIRST, so this tie is breakable on evidence and no fail-open is needed.
+    vocab = {"speaker": {"Bravo Baena, Juan", "Esteban Bravo, Aitor"}}
+    resolver = _resolver(distinct=lambda key: vocab.get(key, set()), deputies=[])
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Bravo"]))
+
+    assert r.filters["speaker"] == "Bravo Baena, Juan"
+    assert r.ambiguous[0].kept == ["Bravo Baena, Juan"]
+
+
+def test_a_tied_first_surname_is_settled_by_government_office():
+    # The motivating case: both carry "Montero", but only one is the finance minister,
+    # and she is who a question about public finances means. Speech volume would pick the
+    # other one (56 speeches to her 47), which is why it is not the signal.
+    vocab = {"speaker": {"Montero Cuadrado, María Jesús", "Vaquero Montero, Maribel"}}
+    resolver = _resolver(
+        distinct=lambda key: vocab.get(key, set()), deputies=[],
+        speaker_offices=[{"speaker": "Montero Cuadrado, María Jesús",
+                          "role": "Vicepresidenta Primera del Gobierno y Ministra de Hacienda"}])
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Montero"]))
+
+    assert r.filters["speaker"] == "Montero Cuadrado, María Jesús"
+    assert r.ambiguous[0].kept == ["Montero Cuadrado, María Jesús"]
+
+
+def test_office_never_decides_when_nobody_bears_it_as_a_first_surname():
+    # Measured and rejected: letting office decide here yields "Caballero" -> Cuerpo
+    # Caballero and "Muñoz" -> Aagesen Muñoz, people nobody refers to that way. Both
+    # carry it second, so the tie is not about them and stays open.
+    vocab = {"speaker": {"Cuerpo Caballero, Carlos", "Sierra Caballero, Francisco"}}
+    resolver = _resolver(
+        distinct=lambda key: vocab.get(key, set()), deputies=[],
+        speaker_offices=[{"speaker": "Cuerpo Caballero, Carlos",
+                          "role": "Ministro de Economía, Comercio y Empresa"}])
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Caballero"]))
+
+    assert r.filters["speaker"] == sorted(vocab["speaker"])
+
+
+def test_a_first_surname_behind_a_particle_still_counts():
+    # "Del Valle" and "De los Santos" are first surnames; the particle is not the part
+    # anybody says, so a query for "Valle" names him.
+    vocab = {"speaker": {"Del Valle Rodríguez, Emilio Jesús", "Mellado Sierra, Valle"}}
+    resolver = _resolver(distinct=lambda key: vocab.get(key, set()), deputies=[])
+    r = resolver.resolve(ParsedQuery(semantic_query="x", speakers=["Valle"]))
+
+    assert r.filters["speaker"] == "Del Valle Rodríguez, Emilio Jesús"
+
+
+def test_first_surname_matching_folds_accents_on_both_sides():
+    # Unit-level on purpose. End to end an unaccented query never gets this far — bare
+    # "Nunez" scores 27 against "Núñez Feijóo, Alberto", well under the 90 threshold — so
+    # this asserts the comparison itself, not a rescue it cannot perform.
+    resolver = _resolver(deputies=[])
+    assert resolver._first_surname_match("Núñez", "Núñez Feijóo, Alberto")
+    assert resolver._first_surname_match("nunez", "Núñez Feijóo, Alberto")
+    assert not resolver._first_surname_match("Núñez", "Paniagua Núñez, Miguel Ángel")
+
+
+def test_the_tied_pick_is_reproducible_across_processes():
+    # The vocabulary arrives as a set, so before sorting the winner depended on string
+    # hashing and the same query answered differently after a restart.
+    vocab = {"speaker": {"Rueda Perelló, Patricia", "Rueda Pérez, Juan Carlos"}}
+    runs = {
+        tuple(_resolver(distinct=lambda key: vocab.get(key, set()), deputies=[])
+              .resolve(ParsedQuery(semantic_query="x", speakers=["Rueda"]))
+              .filters["speaker"])
+        for _ in range(5)
+    }
+    assert len(runs) == 1
 
 
 def test_an_unshared_win_is_not_ambiguous():
