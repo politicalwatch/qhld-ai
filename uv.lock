@@ -676,6 +676,12 @@ wheels = [
 ]
 
 [[package]]
+name = "docopt"
+version = "0.6.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a2/55/8f8cab2afd404cf578136ef2cc5dfb50baa1761b68c9da1fb1e4eed343c9/docopt-0.6.2.tar.gz", hash = "sha256:49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491", size = 25901, upload-time = "2014-06-16T11:18:57.406Z" }
+
+[[package]]
 name = "docstring-parser"
 version = "0.18.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1814,6 +1820,18 @@ wheels = [
 ]
 
 [[package]]
+name = "num2words"
+version = "0.5.14"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "docopt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f6/58/ad645bd38b4b648eb2fc2ba1b909398e54eb0cbb6a7dbd2b4953e38c9621/num2words-0.5.14.tar.gz", hash = "sha256:b066ec18e56b6616a3b38086b5747daafbaa8868b226a36127e0451c0cf379c6", size = 218213, upload-time = "2024-12-17T20:17:10.191Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d6/5b/545e9267a1cc080c8a1be2746113a063e34bcdd0f5173fd665a5c13cb234/num2words-0.5.14-py3-none-any.whl", hash = "sha256:1c8e5b00142fc2966fd8d685001e36c4a9911e070d1b120e1beb721fa1edb33d", size = 163525, upload-time = "2024-12-17T20:17:06.074Z" },
+]
+
+[[package]]
 name = "numpy"
 version = "2.5.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2867,10 +2885,17 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+align = [
+    { name = "huggingface-hub" },
+    { name = "num2words" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
+]
 all = [
     { name = "dateparser" },
     { name = "es-core-news-lg" },
     { name = "fastembed" },
+    { name = "huggingface-hub" },
     { name = "langchain-anthropic" },
     { name = "langchain-cohere" },
     { name = "langchain-google-genai" },
@@ -2878,6 +2903,9 @@ all = [
     { name = "langchain-ollama" },
     { name = "langchain-openai" },
     { name = "langchain-voyageai" },
+    { name = "num2words" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
     { name = "sentence-transformers" },
     { name = "spacy" },
 ]
@@ -2892,15 +2920,23 @@ dev = [
     { name = "dateparser" },
     { name = "es-core-news-lg" },
     { name = "fastembed" },
+    { name = "huggingface-hub" },
     { name = "langchain-ollama" },
     { name = "langchain-openai" },
+    { name = "num2words" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
     { name = "spacy" },
 ]
 engine = [
     { name = "dateparser" },
     { name = "es-core-news-lg" },
     { name = "fastembed" },
+    { name = "huggingface-hub" },
     { name = "langchain-openai" },
+    { name = "num2words" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
     { name = "spacy" },
 ]
 google = [
@@ -2945,6 +2981,7 @@ requires-dist = [
     { name = "es-core-news-lg", marker = "extra == 'ner'", url = "https://github.com/explosion/spacy-models/releases/download/es_core_news_lg-3.8.0/es_core_news_lg-3.8.0-py3-none-any.whl" },
     { name = "fastembed", marker = "extra == 'sparse'", specifier = "==0.8.0" },
     { name = "httpx" },
+    { name = "huggingface-hub", marker = "extra == 'align'", specifier = ">=0.26" },
     { name = "langchain-anthropic", marker = "extra == 'anthropic'", specifier = "==1.4.8" },
     { name = "langchain-cohere", marker = "extra == 'reranker-cohere'", specifier = ">=0.6.0" },
     { name = "langchain-core", specifier = "==1.5.0" },
@@ -2954,19 +2991,22 @@ requires-dist = [
     { name = "langchain-openai", marker = "extra == 'openai'", specifier = "==1.4.0" },
     { name = "langchain-voyageai", marker = "extra == 'reranker-voyage'", specifier = ">=0.4.0" },
     { name = "langsmith", specifier = ">=0.10" },
+    { name = "num2words", marker = "extra == 'align'", specifier = ">=0.5" },
+    { name = "numpy", marker = "extra == 'align'", specifier = ">=2" },
+    { name = "onnxruntime", marker = "extra == 'align'", specifier = ">=1.20" },
     { name = "py3langid", specifier = "==0.3.0" },
     { name = "pydantic-settings", specifier = "==2.14.2" },
     { name = "qdrant-client", specifier = "==1.18.0" },
-    { name = "qhld-ai", extras = ["openai", "ner", "sparse"], marker = "extra == 'engine'" },
-    { name = "qhld-ai", extras = ["openai", "ollama", "anthropic", "google", "mistral", "reranker-cohere", "reranker-voyage", "reranker-local", "sparse", "ner"], marker = "extra == 'all'" },
-    { name = "qhld-ai", extras = ["openai", "ollama", "ner", "sparse"], marker = "extra == 'dev'" },
+    { name = "qhld-ai", extras = ["openai", "ner", "sparse", "align"], marker = "extra == 'engine'" },
+    { name = "qhld-ai", extras = ["openai", "ollama", "anthropic", "google", "mistral", "reranker-cohere", "reranker-voyage", "reranker-local", "sparse", "ner", "align"], marker = "extra == 'all'" },
+    { name = "qhld-ai", extras = ["openai", "ollama", "ner", "sparse", "align"], marker = "extra == 'dev'" },
     { name = "qhld-ai", extras = ["openai", "sparse"], marker = "extra == 'backend'" },
     { name = "qhld-data", git = "https://github.com/politicalwatch/qhld-data.git?branch=feat%2Fparliamentary-speech-analysis" },
     { name = "sentence-transformers", marker = "extra == 'reranker-local'", specifier = ">=3.3.0" },
     { name = "spacy", marker = "extra == 'ner'", specifier = ">=3.8,<3.9" },
     { name = "thefuzz", specifier = "==0.22.1" },
 ]
-provides-extras = ["openai", "ollama", "anthropic", "google", "mistral", "reranker-cohere", "reranker-voyage", "reranker-local", "sparse", "ner", "backend", "engine", "dev", "all"]
+provides-extras = ["openai", "ollama", "anthropic", "google", "mistral", "reranker-cohere", "reranker-voyage", "reranker-local", "sparse", "ner", "align", "backend", "engine", "dev", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2977,7 +3017,7 @@ dev = [
 [[package]]
 name = "qhld-data"
 version = "2.0.1"
-source = { git = "https://github.com/politicalwatch/qhld-data.git?branch=feat%2Fparliamentary-speech-analysis#94231a8cea4a5a8b35082ca8fd8863b16ba2677a" }
+source = { git = "https://github.com/politicalwatch/qhld-data.git?branch=feat%2Fparliamentary-speech-analysis#be02adb3de9d60a8ce262e6c934e71e277892db7" }
 dependencies = [
     { name = "pydantic" },
     { name = "pymongo" },

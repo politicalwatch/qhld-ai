@@ -84,6 +84,17 @@ def extract_annotations(text: str) -> list[str]:
     return [m.group(1).strip() for m in _ANNOTATION_RE.finditer(text or "")]
 
 
+def annotation_spans(text: str) -> list[tuple[int, int]]:
+    """``(start, end)`` of every stage direction, as offsets into ``text`` itself.
+
+    For consumers that must keep working in the original string's coordinates
+    instead of a stripped copy: subtitle alignment reports positions in the stored
+    transcript (the one rendered to readers) while having to skip the annotations,
+    since applause and someone else's interjection are audible but are not the
+    speaker's words. Spans include the parentheses."""
+    return [m.span() for m in _ANNOTATION_RE.finditer(text or "")]
+
+
 @dataclass(frozen=True)
 class Utterance:
     """One interjection recovered from an annotation. ``speaker`` is the surface to

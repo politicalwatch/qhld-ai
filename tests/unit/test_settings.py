@@ -35,6 +35,9 @@ def test_defaults(monkeypatch):
         "NER_MODEL",
         "NER_GAZETTEER",
         "MENTION_MATCH_THRESHOLD",
+        "ALIGNER_PROVIDER",
+        "ALIGNER_MODEL_PATH",
+        "ALIGNER_THREADS",
     ):
         monkeypatch.delenv(key, raising=False)
     settings = Settings(_env_file=None)
@@ -49,6 +52,10 @@ def test_defaults(monkeypatch):
     assert settings.ner_provider == "spacy"
     assert settings.ner_gazetteer is True
     assert settings.mention_match_threshold == 90
+    # Off by default: nothing builds an aligner until a provider is named.
+    assert settings.aligner_provider == "none"
+    assert settings.aligner_model_path == ""
+    assert settings.aligner_model_revision == "2100fb247d8e"
 
 
 @pytest.mark.parametrize("raw", ["False", "false", "0", "no", "off"])

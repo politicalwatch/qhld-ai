@@ -11,6 +11,7 @@ import pytest
 
 from qhld_ai.domain.annotations import (
     Utterance,
+    annotation_spans,
     extract_annotations,
     parse_utterances,
     resolve_interruptions,
@@ -74,6 +75,19 @@ def test_strip_handles_empty_and_annotation_free_text():
 def test_extract_returns_inner_texts_in_order():
     text = "Uno (Risas) dos (Rumores.―Aplausos) tres"
     assert extract_annotations(text) == ["Risas", "Rumores.―Aplausos"]
+
+
+def test_spans_locate_annotations_in_the_original_text():
+    text = "Uno (Risas) dos (Aplausos) tres"
+    spans = annotation_spans(text)
+
+    assert [text[start:end] for start, end in spans] == ["(Risas)", "(Aplausos)"]
+
+
+def test_spans_handle_empty_and_annotation_free_text():
+    assert annotation_spans("") == []
+    assert annotation_spans(None) == []
+    assert annotation_spans("Sin acotaciones.") == []
 
 
 # --- parsing: named verbal ----------------------------------------------------

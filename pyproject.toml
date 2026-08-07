@@ -47,18 +47,29 @@ ner = [
     "es-core-news-lg @ https://github.com/explosion/spacy-models/releases/download/es_core_news_lg-3.8.0/es_core_news_lg-3.8.0-py3-none-any.whl",
     "dateparser>=1.2,<2",
 ]
+# Forced alignment of transcripts to intervention audio, for subtitles. Inference
+# only: the ONNX artifact is downloaded pre-converted, so this pulls onnxruntime
+# (~50M) instead of torch. num2words verbalizes the numerals the model has no
+# tokens for; huggingface_hub fetches the pinned artifact. Also needs ffmpeg on
+# PATH, which is a system package rather than a wheel.
+align = [
+    "onnxruntime>=1.20",
+    "numpy>=2",
+    "num2words>=0.5",
+    "huggingface_hub>=0.26",
+]
 
 # --- Profiles: what each deployment installs (self-referential extras) --------
 # backend prod: Novita emb/rerank + OpenAI llm + BM25 query embedding.
 backend = ["qhld-ai[openai,sparse]"]
-# engine prod: the backend set + spaCy tagging.
-engine = ["qhld-ai[openai,ner,sparse]"]
+# engine prod: the backend set + spaCy tagging + subtitle alignment.
+engine = ["qhld-ai[openai,ner,sparse,align]"]
 # shared dev: adds Ollama embeddings; swap in other providers ad-hoc with e.g.
 # `uv pip install qhld-ai[google]`. No torch by default.
-dev = ["qhld-ai[openai,ollama,ner,sparse]"]
+dev = ["qhld-ai[openai,ollama,ner,sparse,align]"]
 # everything (CI + full local experimentation), including the torch reranker.
 all = [
-    "qhld-ai[openai,ollama,anthropic,google,mistral,reranker-cohere,reranker-voyage,reranker-local,sparse,ner]",
+    "qhld-ai[openai,ollama,anthropic,google,mistral,reranker-cohere,reranker-voyage,reranker-local,sparse,ner,align]",
 ]
 
 [build-system]

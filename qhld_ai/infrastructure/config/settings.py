@@ -188,6 +188,34 @@ class Settings(BaseSettings):
     # named by title is dropped like any other ambiguous one.
     mention_role_apposition: bool = True
 
+    # Subtitles by forced alignment of the Diario transcript against an
+    # intervention's own video cut. "none" (the default) leaves the feature off and
+    # nothing builds an aligner; "mms_onnx" runs MMS-300m through ONNX Runtime.
+    aligner_provider: str = "none"
+    # The artifact, pinned by revision. A pre-converted ONNX build is used so that
+    # PyTorch is never installed to serve alignments; it was verified to reproduce
+    # the author's own weights exactly, rather than trusted to.
+    aligner_model_repo: str = "onnx-community/mms-300m-1130-forced-aligner-ONNX"
+    aligner_model_revision: str = "2100fb247d8e"
+    aligner_model_file: str = "onnx/model.onnx"
+    # Set to bypass the download and read a local file — an air-gapped install, or
+    # an artifact we publish ourselves. Its vocabulary is expected alongside it.
+    aligner_model_path: str = ""
+    # Threads for one alignment. 0 leaves it to onnxruntime. Scaling is markedly
+    # sublinear, so a bulk load gets more throughput from several workers on a few
+    # threads each than from one worker on all of them — and oversubscribing is
+    # worse than running the clips one after another.
+    aligner_threads: int = 0
+    # Subtitle segmentation, in the units the conventions are written in: at most
+    # two lines of ~42 characters, short enough to read at ~21 characters a second.
+    subtitle_max_chars: int = 84
+    subtitle_max_words: int = 14
+    # Below this confidence an alignment is stored and served but flagged for review.
+    # Not a rejection threshold: the check is made with the model that produced the
+    # timings, so it is pessimistic exactly where that model is weak, and measured
+    # false alarms sat on passages whose timings were correct.
+    aligner_min_score: float = 85.0
+
 
 @lru_cache
 def get_settings() -> Settings:
