@@ -4,6 +4,11 @@ Two halves of the same artifact. ``build_cues`` decides *what* each subtitle lin
 says, working from the transcript alone; an aligner then supplies *when*, and
 ``render_vtt`` writes the WebVTT a player's ``<track>`` loads.
 
+The read side is here too: ``subtitle_track`` turns a stored alignment back into
+that WebVTT, and ``aligned_text`` is the guard it goes through. Both take their
+arguments structurally rather than importing the stored models, so this module
+keeps its no-dependency promise and can be tested with nothing but tuples.
+
 Cues are built before alignment on purpose. A cue is the unit we time, so the
 stenographers' departures from the words actually spoken — cleaned-up disfluencies,
 expanded forms — stop mattering once they fall inside a cue whose boundaries land;
@@ -23,6 +28,7 @@ line short enough to read at ~21 characters per second.
 
 import re
 from dataclasses import dataclass
+from hashlib import sha256
 
 
 # Cue boundaries, strongest first: a full stop is a better place to cut than a
@@ -33,6 +39,11 @@ _WORD = re.compile(r"\S+")
 
 # WebVTT requires this exact header, and timestamps in HH:MM:SS.mmm.
 _VTT_HEADER = "WEBVTT"
+
+# Cue text is markup, not plain text: WebVTT reads "<" as the start of a cue span
+# and "&" as an entity. Both occur in the Diario ("PSOE & …", stray angle
+# brackets), and left raw they swallow or garble the rest of the line.
+_VTT_ESCAPES = (("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"))
 
 
 @dataclass(frozen=True)
@@ -110,7 +121,7 @@ def render_vtt(cues, text):
     text = text or ""
     lines = [_VTT_HEADER, ""]
     for index, cue in enumerate(cues, start=1):
-        body = " ".join(text[cue.char_start:cue.char_end].split())
+        body = _escape(" ".join(text[cue.char_start:cue.char_end].split()))
         if not body:
             continue
         lines.append(str(index))
@@ -118,6 +129,13 @@ def render_vtt(cues, text):
         lines.append(body)
         lines.append("")
     return "\n".join(lines)
+
+
+def _escape(body):
+    """The cue text as WebVTT markup. ``&`` first, or the escapes escape each other."""
+    for character, entity in _VTT_ESCAPES:
+        body = body.replace(character, entity)
+    return body
 
 
 def _timestamp(seconds):
@@ -152,3 +170,58 @@ def cue_at(cues, char_offset):
         else:
             return mid
     return None
+
+
+def text_fingerprint(text):
+    """What an alignment records about the text it was made against.
+
+    Stored when the cues are produced and re-computed when they are read, so the
+    two ends of the guard can never disagree about how it is taken.
+    """
+    text = text or ""
+    return sha256(text.encode("utf-8")).hexdigest(), len(text)
+
+
+def aligned_text(blocks, block_index, lang, text_sha256, text_length):
+    """The text an alignment's offsets index, or ``None`` if it has moved on.
+
+    Cues carry no text of their own, so they are only meaningful against the exact
+    string they were cut from: offsets into a transcript that has since been
+    re-cleaned are not stale but silently *wrong*, captioning one sentence with
+    another. A mismatch therefore means "re-align", never "serve anyway".
+
+    ``lang`` is checked alongside the fingerprint because a speech's blocks can be
+    re-ordered as a whole — a same-length translation sitting where the original
+    used to be would otherwise pass a positional check.
+    """
+    if block_index is None or not 0 <= block_index < len(blocks):
+        return None
+    block = blocks[block_index]
+    if lang and block.lang != lang:
+        return None
+    digest, length = text_fingerprint(block.text)
+    if digest != text_sha256 or length != text_length:
+        return None
+    return block.text
+
+
+def subtitle_track(alignment, blocks):
+    """The WebVTT for a stored alignment, or ``None`` if it no longer fits ``blocks``.
+
+    Rendered on demand rather than stored: the track is a projection of the cue
+    numbers and the transcript, so there is no third copy of either to keep in step,
+    and a correction to the text reaches the subtitles without a re-alignment.
+
+    ``alignment`` is anything carrying ``lang``, ``block_index``, ``text_sha256``,
+    ``text_length`` and ``cues`` of milliseconds — in practice a stored
+    ``SpeechAlignment``, which this module deliberately does not import.
+    """
+    text = aligned_text(blocks, alignment.block_index, alignment.lang,
+                        alignment.text_sha256, alignment.text_length)
+    if text is None:
+        return None
+    return render_vtt(
+        [Cue(char_start=cue.char_start, char_end=cue.char_end,
+             start=cue.start_ms / 1000, end=cue.end_ms / 1000)
+         for cue in alignment.cues],
+        text)
