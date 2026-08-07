@@ -50,13 +50,16 @@ ner = [
 # Forced alignment of transcripts to intervention audio, for subtitles. Inference
 # only: the ONNX artifact is downloaded pre-converted, so this pulls onnxruntime
 # (~50M) instead of torch. num2words verbalizes the numerals the model has no
-# tokens for; huggingface_hub fetches the pinned artifact. Also needs ffmpeg on
-# PATH, which is a system package rather than a wheel.
+# tokens for; huggingface_hub fetches the pinned artifact. av decodes the audio of
+# an intervention's video in-process — the same libav* libraries the ffmpeg command
+# drives, at ~44M against ~419M for the system package, so no image needs it
+# installed and a laptop and a container decode with the same code.
 align = [
     "onnxruntime>=1.20",
     "numpy>=2",
     "num2words>=0.5",
     "huggingface_hub>=0.26",
+    "av>=14",
 ]
 
 # --- Profiles: what each deployment installs (self-referential extras) --------
