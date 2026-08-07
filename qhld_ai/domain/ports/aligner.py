@@ -52,8 +52,14 @@ class ModelArtifact:
 
 
 class AlignerPort(Protocol):
-    def align(self, samples, sample_rate: int, words: list[str]) -> Alignment:
+    def align(self, samples, sample_rate: int, words: list[str],
+              lang: str) -> Alignment:
         """Time each of ``words`` against ``samples``.
+
+        ``lang`` is the ISO-639-1 code of the words. It is required rather than
+        defaulted because the transcript has to be turned into something spoken before
+        it can be matched against audio, and a figure is only readable aloud in a known
+        language: a default would quietly read a Galician speech's numbers in Spanish.
 
         ``samples`` is mono float32 audio (see ``infrastructure.audio``). Returns one
         timing per input word, in the same order, monotonically non-decreasing —

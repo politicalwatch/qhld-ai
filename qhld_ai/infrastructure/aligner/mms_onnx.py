@@ -135,15 +135,22 @@ class MmsOnnxAligner(AlignerPort):
 
     # ---- the port -----------------------------------------------------------
 
-    def align(self, samples, sample_rate, words):
+    def align(self, samples, sample_rate, words, lang):
         import numpy as np
 
         if sample_rate != 16000:
             raise ValueError(
                 f"the aligner expects 16 kHz audio, got {sample_rate} Hz")
-        tokens, spans = self._tokenize(words)
+        tokens, spans = self._tokenize(words, lang)
         if not tokens:
             raise ValueError("no alignable tokens in the transcript")
+        substituted = sum(1 for word in words
+                          if _read_in_another_language(word, lang))
+        if substituted:
+            _logger.info(
+                "no verbalizer for %s: %d figures or symbols were voiced in %s to hold "
+                "their place in the audio, and are left out of the confidence score",
+                lang, substituted, _FALLBACK_NUMERAL_LANG)
 
         emissions = self._emissions(samples)
         if len(emissions) < len(tokens):
@@ -157,12 +164,12 @@ class MmsOnnxAligner(AlignerPort):
                        end=float((ends[last - 1] + 1) * FRAME_SECS))
             for first, last in spans
         ]
-        score = self._confidence(emissions, words, spans, starts, ends)
+        score = self._confidence(emissions, words, spans, starts, ends, lang)
         return Alignment(words=timings, score=score, model=self.artifact)
 
     # ---- text -> tokens -----------------------------------------------------
 
-    def _tokenize(self, words):
+    def _tokenize(self, words, lang):
         """Token ids for every word, plus each word's ``(first, last)`` slice of them.
 
         Words map to tokens rather than the reverse, so a word that expands (a
@@ -174,7 +181,7 @@ class MmsOnnxAligner(AlignerPort):
         delimiter = vocab.get("|")
         tokens, spans = [], []
         for word in words:
-            normalised = _normalise(_verbalise(word), vocab, fold)
+            normalised = _normalise(_verbalise(word, lang), vocab, fold)
             if not normalised:
                 # Punctuation, or a symbol this vocabulary has no token for. It is
                 # skipped, not dropped: the span stays empty and the word inherits
@@ -282,10 +289,16 @@ class MmsOnnxAligner(AlignerPort):
 
     # ---- confidence ---------------------------------------------------------
 
-    def _confidence(self, emissions, words, spans, starts, ends):
+    def _confidence(self, emissions, words, spans, starts, ends, lang):
         """Decode the audio under a sample of the alignment and compare it to the
         words placed there. A drifted alignment reads as gibberish; a sound one
-        reproduces the transcript almost character for character."""
+        reproduces the transcript almost character for character.
+
+        Samples holding a figure this language has no verbalizer for are left out. Their
+        timings are sound — that is measured — but the comparison here would be against
+        words nobody said, so scoring them punishes the substitution twice and reports a
+        healthy Galician alignment as a doubtful one.
+        """
         from thefuzz import fuzz
 
         vocab = self.vocab
@@ -296,18 +309,24 @@ class MmsOnnxAligner(AlignerPort):
             return 0.0
 
         step = max(1, len(placed) // _CHECK_SAMPLES)
+        groups = [placed[offset:offset + _CHECK_WORDS]
+                  for offset in range(0, len(placed), step)]
+        groups = [group for group in groups if group]
+        comparable = [group for group in groups
+                      if not any(_read_in_another_language(words[index], lang)
+                                 for index in group)]
+        # Dropping every sample would report 0.0 and invent a doubtful verdict, so a
+        # speech that is figures all the way down keeps its pessimistic score instead.
         ratios = []
-        for offset in range(0, len(placed), step):
-            group = placed[offset:offset + _CHECK_WORDS]
-            if not group:
-                continue
+        for group in (comparable or groups):
             first, last = spans[group[0]][0], spans[group[-1]][1]
             frames = slice(int(starts[first]), int(ends[last - 1]) + 1)
             if frames.stop <= frames.start:
                 continue
             heard = _greedy(emissions[frames], inverse).replace("|", "")
             expected = "".join(
-                _normalise(_verbalise(words[index]), vocab, fold) for index in group)
+                _normalise(_verbalise(words[index], lang), vocab, fold)
+                for index in group)
             if expected:
                 ratios.append(fuzz.ratio(heard, expected))
         return round(sum(ratios) / len(ratios), 1) if ratios else 0.0
@@ -316,39 +335,111 @@ class MmsOnnxAligner(AlignerPort):
 # ---- pure helpers -----------------------------------------------------------
 
 _NUMERAL_RE = re.compile(r"^\d{1,3}(?:\.\d{3})+(?:,\d+)?$|^\d+(?:[.,]\d+)?$")
-_SYMBOLS = {"%": "por ciento", "€": "euros", "$": "dólares", "&": "y"}
+_PUNCTUATION = "«»\"'()[[]].,;:!?¡¿…"
+
+# What a symbol is read as, per language. Basque is deliberately absent: "ehuneko"
+# precedes the number it applies to instead of standing where the "%" does, so it is not
+# a substitution and would be placed in the wrong order.
+_SYMBOLS = {
+    "es": {"%": "por ciento", "€": "euros", "$": "dólares", "&": "y"},
+    "ca": {"%": "per cent", "€": "euros", "$": "dòlars", "&": "i"},
+    "gl": {"%": "por cento", "€": "euros", "$": "dólares", "&": "e"},
+}
+
+# Spanish stands in for a language num2words cannot read numbers in. Measured rather than
+# assumed: what places a cue boundary is a run of tokens of roughly the right *length*
+# filling the figure's gap, not the letters in it. Reading Galician figures in Portuguese
+# instead of Spanish moved 35 of 35 of them by exactly zero frames, and Spanish
+# "cuarenta y siete" placed a Basque "berrogeita zazpi" correctly. So the stand-in is
+# there to occupy the audio, and only the confidence score is told not to trust it.
+_FALLBACK_NUMERAL_LANG = "es"
+
+# num2words spells a decimal point out; every language of this Parliament says "coma",
+# which is what the audio contains.
+_DECIMAL_WORD = {"es": "punto", "ca": "punt"}
 
 
-def _verbalise(word):
-    """Numerals as the words they are read out as.
+def _strip(word):
+    """The word without the punctuation the Diario wraps it in."""
+    return word.strip(_PUNCTUATION)
 
-    The vocabulary has no digit tokens at all, so ``artículo 49`` would offer the
-    aligner nothing for five spoken syllables. Two independent acoustic models were
-    measured disagreeing on cue boundaries almost exclusively where the transcript
-    carries a figure, which is what makes this a requirement rather than a polish.
-    Spanish thousands separators and decimal commas are read the Spanish way:
-    ``118.885`` is a hundred and eighteen thousand, ``47,5`` is forty-seven point
-    five.
+
+def _is_numeral(stripped):
+    """Whether this is a figure that can be read out, rather than prose or a code.
+
+    ``COVID-19`` is not: it carries a digit but is not a bare numeral, and it is said
+    the way it is written.
     """
-    stripped = word.strip("«»\"'()[[]].,;:!?¡¿…")
-    if stripped in _SYMBOLS:
-        return _SYMBOLS[stripped]
-    if not stripped or not any(character.isdigit() for character in stripped):
+    return (bool(stripped) and any(character.isdigit() for character in stripped)
+            and bool(_NUMERAL_RE.match(stripped)))
+
+
+def _verbalise(word, lang):
+    """Numerals and symbols as the words they are read out as, in ``lang`` where we can.
+
+    The vocabulary has no digit tokens at all, so ``artículo 49`` would offer the aligner
+    nothing for five spoken syllables — and a figure that opens or closes a cue then
+    borrows a neighbour's timing, dragging that subtitle line by as much as two seconds.
+    Measured: a figure *inside* a cue is anchored by the words either side of it and moves
+    not at all, so this earns its place at cue boundaries specifically.
+
+    Spanish thousands separators and decimal commas are read the Spanish way: ``118.885``
+    is a hundred and eighteen thousand, ``47,5`` is forty-seven point five.
+    """
+    code = (lang or "").lower()
+    stripped = _strip(word)
+    symbols = _SYMBOLS.get(code, _SYMBOLS[_FALLBACK_NUMERAL_LANG])
+    if stripped in symbols:
+        return symbols[stripped]
+    if not _is_numeral(stripped):
         return word
-    if not _NUMERAL_RE.match(stripped):
-        return word
-    plain = stripped.replace(".", "") if "." in stripped and "," in stripped \
-        else stripped.replace(".", "")
-    plain = plain.replace(",", ".")
+    if not _reads_numbers_in(code):
+        code = _FALLBACK_NUMERAL_LANG
+    plain = stripped.replace(".", "").replace(",", ".")
     try:
         number = float(plain) if "." in plain else int(plain)
-        spoken = _num2words()(number, lang="es")
+        spoken = _num2words()(number, lang=code)
     except (ValueError, OverflowError):
         # Not a figure this can read out — leave it to be dropped by the vocabulary.
         return word
-    # num2words reads a decimal point as "punto"; in Spain it is said "coma", which
-    # is what the audio will contain.
-    return spoken.replace(" punto ", " coma ")
+    decimal = _DECIMAL_WORD.get(code)
+    return spoken.replace(f" {decimal} ", " coma ") if decimal else spoken
+
+
+def _read_in_another_language(word, lang):
+    """Whether this word could only be voiced in a language other than the speech's.
+
+    Its timing is still sound — the stand-in is chosen for its length, not its letters —
+    but the confidence check compares the audio against these words, so they are the one
+    thing it must not score.
+    """
+    code = (lang or "").lower()
+    stripped = _strip(word)
+    if stripped in _SYMBOLS[_FALLBACK_NUMERAL_LANG]:
+        return code not in _SYMBOLS
+    return _is_numeral(stripped) and not _reads_numbers_in(code)
+
+
+_NUMERAL_LANGS = {}
+
+
+def _reads_numbers_in(lang):
+    """Whether numerals can be read out in ``lang`` at all.
+
+    Asked of num2words itself rather than kept as a list here, so the two cannot drift
+    apart: it covers 56 languages including Spanish and Catalan, but neither Galician nor
+    Basque. Answering needs it imported, so an incomplete install still fails loudly
+    instead of silently treating every language as unreadable.
+    """
+    code = (lang or "").lower()
+    if code not in _NUMERAL_LANGS:
+        try:
+            _num2words()(0, lang=code)
+        except NotImplementedError:
+            _NUMERAL_LANGS[code] = False
+        else:
+            _NUMERAL_LANGS[code] = True
+    return _NUMERAL_LANGS[code]
 
 
 _NUM2WORDS = None

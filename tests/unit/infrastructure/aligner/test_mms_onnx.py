@@ -16,6 +16,7 @@ from qhld_ai.infrastructure.aligner.mms_onnx import (
     MmsOnnxAligner,
     _fill_gaps,
     _normalise,
+    _read_in_another_language,
     _runs,
     _speech_mask,
     _verbalise,
@@ -61,7 +62,7 @@ def test_viterbi_places_each_token_where_it_is_spoken():
     aligner = _aligner()
     # "hola" then silence then "que": the second word must land after the gap.
     emissions = _emissions("hola   que")
-    tokens, spans = aligner._tokenize(["hola", "que"])
+    tokens, spans = aligner._tokenize(["hola", "que"], "es")
 
     starts, ends = aligner._viterbi(emissions, np.array(tokens, dtype=np.int64))
 
@@ -76,7 +77,7 @@ def test_align_returns_one_timing_per_word_in_order():
     aligner._emissions = lambda samples: _emissions("hola   que")
 
     alignment = aligner.align(np.zeros(16000, dtype=np.float32), 16000,
-                              ["hola", "que"])
+                              ["hola", "que"], "es")
 
     assert len(alignment.words) == 2
     assert alignment.words[0].start == pytest.approx(0.0)
@@ -98,7 +99,7 @@ def test_align_absorbs_audio_the_transcript_does_not_account_for():
     aligner._emissions = lambda samples: _emissions("hola" + "b" * 30 + "que")
 
     alignment = aligner.align(np.zeros(16000, dtype=np.float32), 16000,
-                              ["hola", "que"])
+                              ["hola", "que"], "es")
 
     assert len(alignment.words) == 2
     assert alignment.words[0].start <= alignment.words[0].end
@@ -108,7 +109,7 @@ def test_align_absorbs_audio_the_transcript_does_not_account_for():
 
 def test_align_rejects_the_wrong_sample_rate():
     with pytest.raises(ValueError, match="16 kHz"):
-        _aligner().align(np.zeros(100, dtype=np.float32), 44100, ["hola"])
+        _aligner().align(np.zeros(100, dtype=np.float32), 44100, ["hola"], "es")
 
 
 def test_align_rejects_a_transcript_too_long_for_the_audio():
@@ -116,12 +117,13 @@ def test_align_rejects_a_transcript_too_long_for_the_audio():
     aligner._emissions = lambda samples: _emissions("ho")
 
     with pytest.raises(ValueError, match="unlikely to match"):
-        aligner.align(np.zeros(16000, dtype=np.float32), 16000, ["hola"] * 20)
+        aligner.align(np.zeros(16000, dtype=np.float32), 16000, ["hola"] * 20,
+                      "es")
 
 
 def test_align_rejects_a_transcript_with_nothing_alignable():
     with pytest.raises(ValueError, match="no alignable tokens"):
-        _aligner().align(np.zeros(16000, dtype=np.float32), 16000, ["...", "¿?"])
+        _aligner().align(np.zeros(16000, dtype=np.float32), 16000, ["...", "¿?"], "es")
 
 
 def test_confidence_is_high_when_the_audio_matches_the_words():
@@ -129,7 +131,7 @@ def test_confidence_is_high_when_the_audio_matches_the_words():
     aligner._emissions = lambda samples: _emissions("hola   que")
 
     alignment = aligner.align(np.zeros(16000, dtype=np.float32), 16000,
-                              ["hola", "que"])
+                              ["hola", "que"], "es")
 
     assert alignment.score > 90
 
@@ -139,7 +141,7 @@ def test_confidence_is_low_when_the_audio_says_something_else():
     aligner._emissions = lambda samples: _emissions("bbbbbbbbbb")
 
     alignment = aligner.align(np.zeros(16000, dtype=np.float32), 16000,
-                              ["hola", "que"])
+                              ["hola", "que"], "es")
 
     assert alignment.score < 50
 
@@ -148,7 +150,7 @@ def test_confidence_is_low_when_the_audio_says_something_else():
 
 def test_tokenize_gives_every_word_its_own_token_slice():
     aligner = _aligner()
-    tokens, spans = aligner._tokenize(["hola", "que"])
+    tokens, spans = aligner._tokenize(["hola", "que"], "es")
 
     assert len(spans) == 2
     assert [tokens[a:b] for a, b in spans] == [
@@ -157,7 +159,7 @@ def test_tokenize_gives_every_word_its_own_token_slice():
 
 def test_tokenize_inserts_the_delimiter_when_the_vocabulary_has_one():
     aligner = _aligner(VOCAB_ES)
-    tokens, spans = aligner._tokenize(["hola", "que"])
+    tokens, spans = aligner._tokenize(["hola", "que"], "es")
 
     assert VOCAB_ES["|"] in tokens
     # The delimiter belongs to no word, so the spans must skip over it.
@@ -172,7 +174,7 @@ def test_tokenize_keeps_accents_when_the_vocabulary_has_them():
 
 def test_unalignable_word_still_gets_a_timing_slot():
     aligner = _aligner()
-    tokens, spans = aligner._tokenize(["hola", "—", "que"])
+    tokens, spans = aligner._tokenize(["hola", "—", "que"], "es")
 
     assert len(spans) == 3
     # The dash borrows the following word's opening rather than vanishing, so the
@@ -198,16 +200,94 @@ def test_fill_gaps_handles_nothing_alignable_at_all():
     ("%", "por ciento"),
 ])
 def test_verbalise_reads_numerals_and_symbols_out(raw, spoken):
-    assert _verbalise(raw) == spoken
+    assert _verbalise(raw, "es") == spoken
 
 
 def test_verbalise_strips_punctuation_around_a_numeral():
-    assert _verbalise("(2017)") == "dos mil diecisiete"
+    assert _verbalise("(2017)", "es") == "dos mil diecisiete"
 
 
 def test_verbalise_leaves_words_alone():
-    assert _verbalise("silicosis") == "silicosis"
-    assert _verbalise("COVID-19") == "COVID-19"   # not a bare numeral
+    assert _verbalise("silicosis", "es") == "silicosis"
+    assert _verbalise("COVID-19", "es") == "COVID-19"   # not a bare numeral
+
+
+# ---- the language the figures are read in -----------------------------------
+
+def test_a_catalan_speech_gets_catalan_numbers():
+    """Catalan has its own verbalizer, so it must not be read as Spanish."""
+    assert _verbalise("2017", "ca") == "dos mil disset"
+    assert _verbalise("47,5", "ca") == "quaranta-set coma cinc"
+    assert _verbalise("%", "ca") == "per cent"
+
+
+def test_a_galician_speech_gets_the_galician_symbol_words():
+    assert _verbalise("%", "gl") == "por cento"
+    assert _verbalise("&", "gl") == "e"
+
+
+@pytest.mark.parametrize("lang", ["gl", "eu"])
+def test_a_language_without_a_verbalizer_still_gets_the_figure_voiced(lang):
+    """num2words has no Galician and no Basque, and leaving the numeral unspoken would
+    cost the cue that opens or closes on it up to two seconds. Spanish stands in purely
+    to occupy that stretch of audio — measured: the stand-in's letters do not matter,
+    its length does."""
+    assert _verbalise("2017", lang) == "dos mil diecisiete"
+
+
+def test_an_uppercase_or_regional_language_code_is_still_understood():
+    """A code that num2words would reject outright must not silently lose the figure."""
+    assert _verbalise("2017", "ES") == "dos mil diecisiete"
+    assert _verbalise("2017", "ca_ES") == "dos mil disset"
+
+
+def test_the_figure_is_voiced_even_with_no_language_at_all():
+    assert _verbalise("2017", None) == "dos mil diecisiete"
+
+
+def test_a_figure_in_a_language_we_can_read_is_not_flagged_as_substituted():
+    assert not _read_in_another_language("2017", "es")
+    assert not _read_in_another_language("2017", "ca")
+    assert not _read_in_another_language("%", "gl")
+    assert not _read_in_another_language("silicosis", "eu")
+
+
+def test_a_figure_we_could_only_voice_in_spanish_is_flagged():
+    assert _read_in_another_language("2017", "gl")
+    assert _read_in_another_language("2017", "eu")
+    # Basque has no symbol words of its own either; Galician does.
+    assert _read_in_another_language("%", "eu")
+
+
+# ---- what the confidence score is allowed to judge --------------------------
+
+def test_a_substituted_figure_is_left_out_of_the_score():
+    """The stand-in words are not what was said, so scoring them would report a sound
+    Galician alignment as a doubtful one — the cue timings are unaffected either way."""
+    aligner = _aligner()
+    # The audio says the Galician words; the transcript's figure is voiced in Spanish.
+    aligner._emissions = lambda samples: _emissions("hola dous mil dezasete que")
+    words = ["hola", "2017", "que"]
+
+    galician = aligner.align(np.zeros(16000, dtype=np.float32), 16000, words, "gl")
+    spanish = aligner.align(np.zeros(16000, dtype=np.float32), 16000, words, "es")
+
+    # Same timings: the substitution is what anchors the figure in both cases.
+    assert [(w.start, w.end) for w in galician.words] == \
+           [(w.start, w.end) for w in spanish.words]
+    # Only the score differs, because Spanish claims those words were spoken.
+    assert galician.score > spanish.score
+
+
+def test_the_score_survives_a_speech_that_is_nothing_but_substituted_figures():
+    """Dropping every sample would report 0.0 and invent a doubtful verdict, so such a
+    speech keeps its pessimistic score instead of a fabricated one."""
+    aligner = _aligner()
+    aligner._emissions = lambda samples: _emissions("dous mil dezasete")
+
+    alignment = aligner.align(np.zeros(16000, dtype=np.float32), 16000, ["2017"], "gl")
+
+    assert alignment.score > 0
 
 
 # ---- voice activity ---------------------------------------------------------
@@ -249,6 +329,9 @@ def test_missing_verbalizer_fails_loudly(monkeypatch):
     import qhld_ai.infrastructure.aligner.mms_onnx as module
 
     monkeypatch.setattr(module, "_NUM2WORDS", None)
+    # Which languages it can read is answered by num2words too, and cached — so the
+    # cache has to be cold for the missing install to be reachable at all.
+    monkeypatch.setattr(module, "_NUMERAL_LANGS", {})
     real_import = builtins.__import__
 
     def deny(name, *args, **kwargs):
@@ -258,4 +341,4 @@ def test_missing_verbalizer_fails_loudly(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", deny)
     with pytest.raises(RuntimeError, match="num2words is required"):
-        _verbalise("2017")
+        _verbalise("2017", "es")
