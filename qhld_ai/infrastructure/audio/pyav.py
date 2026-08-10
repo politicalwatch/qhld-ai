@@ -37,6 +37,45 @@ class AudioDecodeError(Exception):
     """
 
 
+class DurationUnavailable(Exception):
+    """How long a video runs could not be established.
+
+    Separate from ``AudioDecodeError`` because the two have opposite consequences:
+    failing to decode means an alignment cannot be made, while failing to read a
+    duration means one number is missing. Raised rather than returning ``0.0`` or
+    ``None`` so that "the clip is unknown" can never be mistaken for "the clip is
+    empty" by a caller doing arithmetic on it.
+    """
+
+
+def probe_duration(source):
+    """Seconds of ``source`` (a URL or a path), read from the container header.
+
+    Only the header is fetched, so this costs a range request rather than a
+    download — about 0.8 s against the Congress CDN, versus tens of seconds and
+    ~10 MB per minute of speech to pull the whole file.
+
+    Worth having stored: the Diario's text for an intervention should take roughly
+    as long to say as its clip runs, so this is what lets extraction check its own
+    output. A transcript that could not physically be spoken in the time available
+    has been truncated, over-captured, or mis-split across languages, and none of
+    those are visible from the text alone.
+    """
+    import av
+
+    try:
+        with av.open(str(source), timeout=(_OPEN_TIMEOUT, _READ_TIMEOUT)) as container:
+            duration = container.duration
+    except av.FFmpegError as exc:
+        raise DurationUnavailable(f"could not open {source}: {exc}") from exc
+
+    if not duration:
+        # Streams without a header duration exist (live containers, some fragmented
+        # mp4s). Saying so beats reporting the zero libav uses for "don't know".
+        raise DurationUnavailable(f"no duration declared by {source}")
+    return duration / av.time_base
+
+
 def decode_pcm(source, sample_rate=SAMPLE_RATE):
     """Mono float32 samples of ``source`` (a URL or a path), resampled.
 

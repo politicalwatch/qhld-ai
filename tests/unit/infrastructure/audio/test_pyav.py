@@ -14,7 +14,9 @@ import pytest
 from qhld_ai.infrastructure.audio.pyav import (
     SAMPLE_RATE,
     AudioDecodeError,
+    DurationUnavailable,
     decode_pcm,
+    probe_duration,
 )
 
 pytestmark = pytest.mark.unit
@@ -105,3 +107,30 @@ def test_a_file_that_is_not_media_raises_audio_decode_error(tmp_path):
 
     with pytest.raises(AudioDecodeError):
         decode_pcm(str(junk))
+
+
+def test_probe_duration_reads_the_length_without_decoding(tmp_path):
+    source = _write_tone(tmp_path / "tone.wav", seconds=2.0)
+
+    assert probe_duration(str(source)) == pytest.approx(2.0, abs=0.05)
+
+
+def test_probe_duration_is_independent_of_the_sample_rate(tmp_path):
+    source = _write_tone(tmp_path / "48k.wav", seconds=1.5, rate=48000)
+
+    assert probe_duration(str(source)) == pytest.approx(1.5, abs=0.05)
+
+
+def test_probe_duration_raises_rather_than_reporting_zero(tmp_path):
+    # A caller dividing a transcript's length by this must never be handed a 0 or a
+    # None that reads as "the clip is empty".
+    with pytest.raises(DurationUnavailable, match="could not open"):
+        probe_duration(str(tmp_path / "does-not-exist.mp4"))
+
+
+def test_probe_duration_on_something_that_is_not_media(tmp_path):
+    junk = tmp_path / "not-a-video.mp4"
+    junk.write_bytes(b"this is not a container")
+
+    with pytest.raises(DurationUnavailable):
+        probe_duration(str(junk))
