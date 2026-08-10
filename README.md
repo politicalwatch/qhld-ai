@@ -23,6 +23,14 @@ Configuration is env-driven via a Pydantic `Settings`
 ## Development
 
 ```bash
-uv sync
+uv sync --extra dev
 uv run pytest
 ```
+
+**Use `--extra dev`, not a bare `uv sync`.** Everything provider- or feature-specific
+lives in an optional extra (see `[project.optional-dependencies]`), and `uv sync` is
+exact: it installs the core dependencies plus the `dev` dependency-group and *removes*
+everything else. So a bare `uv sync` — or `uv run`, which syncs implicitly — deletes
+`langchain-openai`, spaCy, `onnxruntime`, `av` and `num2words`, and the suite then fails
+in a way that looks like a regression at HEAD and is not one. `dev` is the profile extra
+that installs what the tests need without pulling torch.

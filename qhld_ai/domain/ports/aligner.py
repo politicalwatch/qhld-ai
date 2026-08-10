@@ -51,10 +51,40 @@ class ModelArtifact:
     sha256: str | None = None
 
 
+@dataclass(frozen=True)
+class AlignRequest:
+    """One transcript to time against a clip: its words and their language.
+
+    A clip can carry more than one, because a co-official-language intervention is
+    published as the original followed by its full Spanish interpretation and both are
+    worth subtitling — the original because it is what was said, the translation because
+    most readers only read Spanish.
+    """
+
+    words: list[str]
+    lang: str
+
+
 class AlignerPort(Protocol):
+    def align_all(self, samples, sample_rate: int,
+                  requests: list[AlignRequest]) -> list[Alignment]:
+        """Time several transcripts against the same audio, one ``Alignment`` each.
+
+        Not a convenience wrapper around ``align``: it is the other way round. What an
+        acoustic model computes from a clip depends on the clip alone, so a second
+        transcript over the same audio costs only the search that places its words —
+        measured at roughly a fifth of a single alignment, against the double a naive
+        loop would pay.
+
+        Returns one alignment per request, in order. A request whose words cannot fit
+        the audio at all raises, since that means the clip and the transcript do not
+        belong together and no timing of it would be meaningful.
+        """
+        ...
+
     def align(self, samples, sample_rate: int, words: list[str],
               lang: str) -> Alignment:
-        """Time each of ``words`` against ``samples``.
+        """Time each of ``words`` against ``samples`` — the one-transcript case.
 
         ``lang`` is the ISO-639-1 code of the words. It is required rather than
         defaulted because the transcript has to be turned into something spoken before

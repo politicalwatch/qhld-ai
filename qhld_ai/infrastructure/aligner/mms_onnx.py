@@ -24,7 +24,8 @@ import json
 import re
 import unicodedata
 
-from qhld_ai.domain.ports.aligner import Alignment, AlignerPort, ModelArtifact, WordTiming
+from qhld_ai.domain.ports.aligner import (
+    AlignRequest, Alignment, AlignerPort, ModelArtifact, WordTiming)
 from qhld_ai.infrastructure.config.settings import Settings
 from qhld_ai.logger import get_logger
 
@@ -135,28 +136,55 @@ class MmsOnnxAligner(AlignerPort):
 
     # ---- the port -----------------------------------------------------------
 
-    def align(self, samples, sample_rate, words, lang):
-        import numpy as np
+    def align_all(self, samples, sample_rate, requests):
+        """One acoustic pass, one search per transcript.
 
+        The emissions are a property of the audio, so they are computed once and every
+        request is placed against the same ones. That is what makes a second subtitle
+        track for the same clip nearly free, and it also guarantees the tracks describe
+        one identical reading of the audio rather than two runs that might differ.
+        """
         if sample_rate != 16000:
             raise ValueError(
                 f"the aligner expects 16 kHz audio, got {sample_rate} Hz")
-        tokens, spans = self._tokenize(words, lang)
+        if not requests:
+            return []
+
+        prepared = [self._prepare(request) for request in requests]
+        emissions = self._emissions(samples)
+        return [self._place(emissions, request, tokens, spans)
+                for request, tokens, spans in prepared]
+
+    def align(self, samples, sample_rate, words, lang):
+        return self.align_all(
+            samples, sample_rate, [AlignRequest(words=words, lang=lang)])[0]
+
+    def _prepare(self, request):
+        """Tokens for one request, before any audio is touched.
+
+        Done for every request up front so a transcript that cannot be tokenised at all
+        fails before the acoustic pass is paid for.
+        """
+        tokens, spans = self._tokenize(request.words, request.lang)
         if not tokens:
             raise ValueError("no alignable tokens in the transcript")
-        substituted = sum(1 for word in words
-                          if _read_in_another_language(word, lang))
+        substituted = sum(1 for word in request.words
+                          if _read_in_another_language(word, request.lang))
         if substituted:
             _logger.info(
                 "no verbalizer for %s: %d figures or symbols were voiced in %s to hold "
                 "their place in the audio, and are left out of the confidence score",
-                lang, substituted, _FALLBACK_NUMERAL_LANG)
+                request.lang, substituted, _FALLBACK_NUMERAL_LANG)
+        return request, tokens, spans
 
-        emissions = self._emissions(samples)
+    def _place(self, emissions, request, tokens, spans):
+        import numpy as np
+
         if len(emissions) < len(tokens):
             raise ValueError(
-                f"{len(words)} words need more audio than {len(emissions) * FRAME_SECS:.0f}s "
-                "can hold; the video and the transcript are unlikely to match")
+                f"{len(request.words)} words need more audio than "
+                f"{len(emissions) * FRAME_SECS:.0f}s can hold; the video and the "
+                "transcript are unlikely to match")
         starts, ends = self._viterbi(emissions, np.array(tokens, dtype=np.int64))
 
         timings = [
@@ -164,7 +192,8 @@ class MmsOnnxAligner(AlignerPort):
                        end=float((ends[last - 1] + 1) * FRAME_SECS))
             for first, last in spans
         ]
-        score = self._confidence(emissions, words, spans, starts, ends, lang)
+        score = self._confidence(emissions, request.words, spans, starts, ends,
+                                 request.lang)
         return Alignment(words=timings, score=score, model=self.artifact)
 
     # ---- text -> tokens -----------------------------------------------------

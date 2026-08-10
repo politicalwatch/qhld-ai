@@ -10,7 +10,7 @@ import builtins
 import numpy as np
 import pytest
 
-from qhld_ai.domain.ports.aligner import ModelArtifact
+from qhld_ai.domain.ports.aligner import AlignRequest, ModelArtifact
 from qhld_ai.infrastructure.aligner.mms_onnx import (
     FRAME_SECS,
     MmsOnnxAligner,
@@ -105,6 +105,67 @@ def test_align_absorbs_audio_the_transcript_does_not_account_for():
     assert alignment.words[0].start <= alignment.words[0].end
     assert alignment.words[0].end <= alignment.words[1].start
     assert alignment.words[1].start <= alignment.words[1].end
+
+
+def test_align_all_pays_for_the_acoustic_pass_once():
+    """The whole reason a second subtitle track is affordable.
+
+    Emissions depend on the audio alone, so two transcripts over one clip must share
+    them — otherwise a co-official speech would cost two full alignments instead of one
+    plus a search.
+    """
+    aligner = _aligner()
+    calls = []
+
+    def counted(samples):
+        calls.append(samples)
+        return _emissions("hola   que")
+
+    aligner._emissions = counted
+
+    alignments = aligner.align_all(
+        np.zeros(16000, dtype=np.float32), 16000,
+        [AlignRequest(words=["hola", "que"], lang="es"),
+         AlignRequest(words=["hola", "que"], lang="gl")])
+
+    assert len(calls) == 1
+    assert len(alignments) == 2
+    # Same audio, same reading of it: two tracks of one clip cannot disagree about when
+    # a word was said.
+    assert alignments[0].words[0].start == alignments[1].words[0].start
+
+
+def test_align_all_places_each_transcript_on_its_own_words():
+    aligner = _aligner()
+    aligner._emissions = lambda samples: _emissions("hola   que")
+
+    alignments = aligner.align_all(
+        np.zeros(16000, dtype=np.float32), 16000,
+        [AlignRequest(words=["hola", "que"], lang="es"),
+         AlignRequest(words=["hola"], lang="es")])
+
+    assert [len(a.words) for a in alignments] == [2, 1]
+
+
+def test_align_all_rejects_a_transcript_before_paying_for_the_audio():
+    """An untokenisable request must fail before the acoustic pass, not after it."""
+    aligner = _aligner()
+    calls = []
+    aligner._emissions = lambda samples: calls.append(1) or _emissions("hola")
+
+    with pytest.raises(ValueError, match="no alignable tokens"):
+        aligner.align_all(np.zeros(16000, dtype=np.float32), 16000,
+                          [AlignRequest(words=["hola"], lang="es"),
+                           AlignRequest(words=["..."], lang="es")])
+
+    assert calls == []
+
+
+def test_align_all_with_no_requests_does_no_work():
+    aligner = _aligner()
+    aligner._emissions = lambda samples: pytest.fail("should not decode anything")
+
+    assert aligner.align_all(np.zeros(16000, dtype=np.float32), 16000, []) == []
 
 
 def test_align_rejects_the_wrong_sample_rate():
