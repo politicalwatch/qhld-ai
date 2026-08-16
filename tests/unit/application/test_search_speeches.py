@@ -641,3 +641,112 @@ def test_browse_grouped_of_an_empty_page_costs_no_second_call():
 
     assert _browse_service(store).browse_grouped(page_size=5) == []
     assert store.browse_calls == []
+
+
+# --- Scoring a co-official passage against its Spanish sibling -----------------
+# A cross-encoder reads a language-mismatched pair as junk however relevant it
+# is, so a lang-filtered query floored to nothing. These pin the compensation:
+# the sibling is scored TOO and the best score wins, so a passage can be rescued
+# but never demoted.
+
+
+class _ScoresByText:
+    """Reranker stub scoring each hit by a table keyed on its text."""
+
+    def __init__(self, scores):
+        self.scores = scores
+        self.seen = []
+
+    def rerank(self, query, hits, k):
+        self.seen.append([h.payload.get("text") for h in hits])
+        rescored = [SearchHit(id=h.id, score=self.scores[h.payload["text"]], payload=h.payload)
+                    for h in hits]
+        rescored.sort(key=lambda hit: hit.score, reverse=True)
+        return rescored[:k]
+
+
+def _sibling_pool():
+    return [SearchHit(id="p1", score=0.5,
+                      payload={"text": "eu", "lang": "eu", "sibling_texts": ["es1", "es2"]})]
+
+
+def _sibling_service(reranker, **overrides):
+    return SearchSpeeches(
+        settings=_settings(reranker_provider="x", **overrides),
+        embedder=_FakeEmbedder(), store=_WideStore(_sibling_pool()), reranker=reranker)
+
+
+def test_lang_filtered_search_scores_the_spanish_siblings_too():
+    reranker = _ScoresByText({"eu": 0.04, "es1": 0.96, "es2": 0.30})
+
+    hits = _sibling_service(reranker).search("teletrabajo", k=5, filters={"lang": "eu"})
+
+    # The passage and both of its siblings were submitted, ...
+    assert reranker.seen[0] == ["eu", "es1", "es2"]
+    # ... the best score won, and it is the passage itself that comes back.
+    assert hits[0].score == 0.96
+    assert hits[0].id == "p1" and hits[0].payload["text"] == "eu"
+
+
+def test_sibling_scoring_never_demotes_a_passage():
+    """The reason it is a max and not a substitution: a mispaired sibling
+    measurably pushed a healthy Catalan passage below the floor."""
+    reranker = _ScoresByText({"eu": 0.42, "es1": 0.05, "es2": 0.05})
+
+    hits = _sibling_service(reranker).search("q", k=5, filters={"lang": "eu"})
+
+    assert hits[0].score == 0.42
+
+
+def test_spanish_filtered_search_scores_only_the_passage():
+    """A Spanish passage is already in the query's language — nothing to compensate."""
+    reranker = _ScoresByText({"eu": 0.04, "es1": 0.96, "es2": 0.30})
+
+    hits = _sibling_service(reranker).search("q", k=5, filters={"lang": "es"})
+
+    assert reranker.seen[0] == ["eu"]
+    assert hits[0].score == 0.04
+
+
+def test_unfiltered_search_scores_only_the_passage():
+    reranker = _ScoresByText({"eu": 0.04, "es1": 0.96, "es2": 0.30})
+
+    _sibling_service(reranker).search("q", k=5)
+
+    assert reranker.seen[0] == ["eu"]
+
+
+def test_passage_without_siblings_is_scored_alone():
+    """Nothing is indexed for a monolingual Spanish speech, and the corpus is
+    only partly backfilled — an absent key must not break the query."""
+    reranker = _ScoresByText({"eu": 0.04})
+    store = _WideStore([SearchHit(id="p1", score=0.5, payload={"text": "eu", "lang": "eu"})])
+    service = SearchSpeeches(
+        settings=_settings(reranker_provider="x"), embedder=_FakeEmbedder(),
+        store=store, reranker=reranker)
+
+    assert service.search("q", k=5, filters={"lang": "eu"})[0].score == 0.04
+
+
+def test_sibling_scores_survive_the_relevance_floor():
+    """The point of the whole change: the passage the floor used to delete is
+    the one the user asked for."""
+    reranker = _ScoresByText({"eu": 0.04, "es1": 0.96, "es2": 0.30})
+
+    hits = _sibling_service(reranker, reranker_score_floor=0.2).search(
+        "q", k=5, filters={"lang": "eu"})
+
+    assert [hit.id for hit in hits] == ["p1"]
+
+
+@pytest.mark.parametrize("filters, expected", [
+    ({"lang": "eu"}, "eu"),
+    ({"lang": "ca"}, "ca"),
+    ({"lang": "es"}, None),          # already the query's language
+    ({"lang": ["gl"]}, "gl"),        # single-valued list still names one language
+    ({"lang": ["ca", "gl"]}, None),  # no one language to compensate for
+    ({"speaker": "X"}, None),
+    (None, None),
+])
+def test_sibling_lang_reads_the_filter(filters, expected):
+    assert SearchSpeeches._sibling_lang(filters) == expected

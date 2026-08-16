@@ -211,6 +211,49 @@ class QdrantAdapter(VectorStorePort):
                 indices=point.sparse.indices, values=point.sparse.values),
         }
 
+    def points_by(self, name: str, key: str, value) -> list[VectorPoint]:
+        points = []
+        offset = None
+        scroll_filter = models.Filter(must=self._conditions(key, value))
+        while True:
+            records, offset = self._retry(lambda: self.client.scroll(
+                collection_name=name,
+                scroll_filter=scroll_filter,
+                with_payload=True,
+                with_vectors=True,
+                limit=256,
+                offset=offset,
+            ))
+            points.extend(
+                VectorPoint(id=str(record.id), vector=self._dense_of(record.vector),
+                            payload=record.payload or {})
+                for record in records
+            )
+            if offset is None:
+                break
+        return points
+
+    @staticmethod
+    def _dense_of(vector):
+        """The dense vector, whichever layout the collection uses: a hybrid
+        collection returns a dict of named vectors, the dense-only one a bare
+        list."""
+        if isinstance(vector, dict):
+            return vector.get(_DENSE) or []
+        return vector or []
+
+    def set_payload(self, name: str, payloads: dict[str, dict]) -> None:
+        # One call per distinct payload VALUE is unavoidable (Qdrant sets one
+        # payload across a set of points), but points sharing a value are batched.
+        # Callers here pass per-point values, so this is one call per point —
+        # acceptable for a backfill, which is not on any serving path.
+        for point_id, payload in payloads.items():
+            if not payload:
+                continue
+            self._retry(lambda pid=point_id, pl=payload: self.client.set_payload(
+                collection_name=name, payload=pl, points=[pid],
+            ))
+
     def delete_by(self, name: str, key: str, value) -> None:
         self._retry(lambda: self.client.delete(
             collection_name=name,

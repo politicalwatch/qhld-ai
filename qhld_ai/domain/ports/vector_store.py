@@ -60,6 +60,20 @@ class VectorStorePort(Protocol):
         """Delete every point whose payload ``key`` equals ``value``."""
         ...
 
+    def points_by(self, name: str, key: str, value) -> list[VectorPoint]:
+        """Every point whose payload ``key`` matches ``value``, WITH its dense
+        vector — so a derived field can be computed from the embeddings already
+        stored instead of re-embedding the corpus."""
+        ...
+
+    def set_payload(self, name: str, payloads: dict[str, dict]) -> None:
+        """Merge extra payload keys into existing points, by point id.
+
+        Additive and vector-free: the point keeps its vectors and every payload
+        key not named here. That is what lets a derived field be backfilled onto
+        an indexed corpus without re-embedding it."""
+        ...
+
     def distinct_values(self, name: str, key: str, where: dict | None = None) -> set:
         """The set of distinct values the payload ``key`` takes across the
         collection — used to skip already-indexed items on an incremental run.

@@ -116,9 +116,74 @@ class SearchSpeeches:
     def _store_browse_grouped(self, collection, **kwargs):
         return self.store.browse_grouped(collection, **kwargs)
 
+    @staticmethod
+    def _sibling_lang(filters):
+        """The co-official language a query asked to be filtered to, or ``None``.
+
+        Only a single non-Spanish code counts: Spanish passages need no sibling
+        (they are already in the query's language), and a multi-valued filter has
+        no one language to compensate for."""
+        lang = (filters or {}).get("lang")
+        if isinstance(lang, (list, tuple, set)):
+            lang = next(iter(lang)) if len(lang) == 1 else None
+        return lang if lang and lang != "es" else None
+
     @traceable(name="rerank", run_type="chain")
-    def _rerank(self, query, hits, k):
-        return self.reranker.rerank(query, hits, k)
+    def _rerank(self, query, hits, k, lang=None):
+        if not lang:
+            return self.reranker.rerank(query, hits, k)
+        return self._rerank_against_siblings(query, hits, k)
+
+    def _rerank_against_siblings(self, query, hits, k):
+        """Rerank a language-filtered pool, scoring each passage against its
+        Spanish interpretation as well as itself and keeping the better score.
+
+        A cross-encoder reads a language-mismatched pair as junk however relevant
+        it is: the same sentence scores 0.0396 in Basque and 0.9649 in the Spanish
+        interpretation the Diario publishes beside it — 24x, purely from language.
+        Ordering survives that (the collapse is roughly uniform within a speech),
+        but the ABSOLUTE score does not, so the relevance floor deleted every hit
+        of a lang-filtered query and the user saw "no coverage" for speeches the
+        corpus holds. Scoring the sibling puts the pair back in one language.
+
+        ``max`` rather than substitution, because substitution is not safe: a
+        mis-paired sibling measurably pushed a healthy Catalan passage from 0.4240
+        to 0.0502 (below the floor, i.e. deleted) and swapped the top two results.
+        Taking the best score makes a passage's own score a lower bound on itself,
+        so nothing can be demoted and a wrong sibling simply loses. That is also
+        why there is no confidence threshold on the pairing: an audit of all 63
+        Basque passages found pairing 93.7% correct but the margin UNABLE to
+        separate right from wrong (the cleanest cut costs 17.5% of correct pairs
+        and still admits a defect), so a gate would cost more than it saves.
+
+        Each candidate text becomes its own proxy hit, keyed positionally because
+        the siblings of one passage would otherwise share its id. Only the score
+        crosses back — the returned hits carry the native payload, so nothing
+        downstream can tell a sibling was ever scored.
+        """
+        proxies, owners = [], []
+        for hit in hits:
+            texts = [hit.payload.get("text") or ""]
+            # Two siblings, not one: the blocks are chunked independently and their
+            # boundaries do not coincide, so a passage often straddles two Spanish
+            # ones. Every partial mispairing found in the audit was "picked the
+            # minority half of a straddle", and the runner-up recovers it.
+            texts += [text for text in (hit.payload.get("sibling_texts") or []) if text]
+            for text in texts:
+                proxies.append(SearchHit(id=str(len(proxies)), score=0.0,
+                                         payload={**hit.payload, "text": text}))
+                owners.append(hit)
+        best = {}
+        for proxy in self.reranker.rerank(query, proxies, len(proxies)):
+            owner = owners[int(proxy.id)]
+            if proxy.score > best.get(owner.id, float("-inf")):
+                best[owner.id] = proxy.score
+        ranked = sorted(
+            (SearchHit(id=hit.id, score=best[hit.id], payload=hit.payload)
+             for hit in hits if hit.id in best),
+            key=lambda hit: hit.score, reverse=True,
+        )
+        return ranked[:k]
 
     def _rerank_metadata(self):
         """Stamped on rerank spans so a trace names the serving provider/model."""
@@ -126,7 +191,13 @@ class SearchSpeeches:
                              "model": self.settings.reranker_model}}
 
     @traceable(name="search_speeches", run_type="chain")
-    def search(self, query, k=10, filters=None, apply_floor=True) -> list[SearchHit]:
+    def search(self, query, k=10, filters=None, apply_floor=True,
+               lang=None) -> list[SearchHit]:
+        """``lang`` names the co-official language to score siblings for when it
+        is NOT among ``filters`` — the detail page drops the language filter (it
+        must highlight whichever transcript is on screen) but still needs the
+        compensation, or its co-official passages fall under the floor. Left
+        unset, the language is read from the filters as usual."""
         vector = self._embed_query(query)
         # The query vector's length is the model dimension, which is part of the
         # per-model collection name — no separate probe needed.
@@ -138,7 +209,9 @@ class SearchSpeeches:
         # Over-fetch a wide candidate pool for the cross-encoder to reorder.
         fetch = max(k, self.settings.reranker_top_n)
         hits = self._store_search(collection, vector, fetch, clean, **extra)
-        reranked = self._rerank(query, hits, k, langsmith_extra=self._rerank_metadata())
+        sibling_lang = self._sibling_lang({"lang": lang} if lang else clean)
+        reranked = self._rerank(query, hits, k, lang=sibling_lang,
+                                langsmith_extra=self._rerank_metadata())
         return self._above_floor(reranked, apply_floor)
 
     @traceable(name="search_speeches_grouped", run_type="chain")
@@ -186,6 +259,7 @@ class SearchSpeeches:
         )
         pooled = [hit for group in groups for hit in group.highlights]
         rescored = self._rerank(query, pooled, len(pooled),
+                                lang=self._sibling_lang(clean),
                                 langsmith_extra=self._rerank_metadata())
         # Every score is kept, below-floor ones included: the floor is applied per
         # group in _build_group, and the top-up below reads this map to know which
@@ -334,6 +408,7 @@ class SearchSpeeches:
         if not fresh:
             return page
         rescored = self._rerank(query, fresh, len(fresh),
+                                lang=self._sibling_lang(filters),
                                 langsmith_extra=self._rerank_metadata())
         scored = {**scored, **{hit.id: hit.score for hit in rescored}}
         passages = {}
