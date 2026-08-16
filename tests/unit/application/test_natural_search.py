@@ -35,10 +35,12 @@ class _SpySearch:
     def __init__(self):
         self.calls = []
         self.floors = []   # apply_floor of each call, parallel to ``calls``
+        self.langs = []    # sibling-scoring language, likewise
 
-    def search(self, query, k=10, filters=None, apply_floor=True):
+    def search(self, query, k=10, filters=None, apply_floor=True, lang=None):
         self.calls.append(("search", query, k, filters))
         self.floors.append(apply_floor)
+        self.langs.append(lang)
         return ["hit"]
 
     def search_grouped(self, query, page_size=10, highlights=3, filters=None,
@@ -436,3 +438,28 @@ def test_passages_reuses_a_precomputed_parse():
     assert not hasattr(parser, "query")          # parser never invoked
     assert service.search.calls[0][1] == "vivienda"
     assert result.parsed is parsed
+
+
+def test_passages_keeps_the_language_as_a_hint_but_not_as_a_filter():
+    """A co-official speech has two transcripts and the detail page lets the
+    reader switch. Filtering by language would leave the other one with no
+    highlights — and the page hides the panel, and the video's match markers
+    with it, when nothing matches the transcript on screen. The language still
+    has to reach the search, or the co-official passages fall under the floor."""
+    parsed = ParsedQuery(semantic_query="teletrabajo", lang="eu")
+    service = _service(parsed, Resolution(filters={"lang": "eu", "legislature": "15"}))
+
+    service.passages("qué se ha dicho en euskera sobre el teletrabajo",
+                     today=date(2025, 7, 3), speech_id="sp-7")
+
+    # Every speech-level filter is kept; only the passage-level one is dropped.
+    assert service.search.calls[0][3] == {"legislature": "15", "speech_id": "sp-7"}
+    assert service.search.langs[0] == "eu"
+
+
+def test_passages_of_a_query_without_a_language_pass_no_hint():
+    service = _service(ParsedQuery(semantic_query="vivienda"), Resolution())
+
+    service.passages("vivienda", today=date(2025, 7, 3), speech_id="sp-1")
+
+    assert service.search.langs[0] is None

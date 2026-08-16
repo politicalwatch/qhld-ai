@@ -219,7 +219,18 @@ class NaturalSearchSpeeches:
         ``speech_id`` payload filter; combining it with the query's resolved
         filters is sound because the speech was already a search result, so it
         satisfies them. Same floor gate as ``execute`` (the passages must match
-        what the results page showed), and ``parsed`` reuses the memoized parse."""
+        what the results page showed), and ``parsed`` reuses the memoized parse.
+
+        ``lang`` is the exception, and is deliberately NOT applied here: it is
+        the one resolved filter that selects PASSAGES rather than speeches (every
+        other one is a property of the speech, which this speech already
+        satisfies). A co-official speech is published as two transcripts and the
+        detail page lets the reader switch between them, so filtering by language
+        would leave the other transcript with no highlights at all — and the page
+        hides the panel, and the video's match markers with it, when nothing
+        matches the transcript on screen. It still rides along as the
+        sibling-scoring hint, which is what keeps the co-official passages above
+        the floor."""
         parsed = parsed or self.parser.parse(query, today)
         resolution, filters, semantic, apply_floor = self._prepare(query, parsed)
         if resolution.blocked:
@@ -235,9 +246,11 @@ class NaturalSearchSpeeches:
         # k is a ceiling the Qdrant API requires, not a passage cap: the
         # speech_id filter narrows candidates to this one speech's chunks (dozens
         # at most), so a large k just means "return them all above the floor".
-        scoped = {**(filters or {}), "speech_id": speech_id}
+        scoped = {key: value for key, value in (filters or {}).items() if key != "lang"}
+        scoped["speech_id"] = speech_id
         hits = self.search.search(
-            semantic, k=_PASSAGES_K, filters=scoped, apply_floor=apply_floor)
+            semantic, k=_PASSAGES_K, filters=scoped, apply_floor=apply_floor,
+            lang=(filters or {}).get("lang"))
         return NaturalResult(
             parsed=parsed, resolution=resolution, semantic_query=semantic,
             hits=hits)
