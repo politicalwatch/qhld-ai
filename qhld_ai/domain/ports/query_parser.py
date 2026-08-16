@@ -109,6 +109,15 @@ class ParsedQuery(BaseModel):
         description=(
             "Language code (es/ca/gl/eu) only if the user explicitly asks for a "
             "language. Null otherwise."))
+    query_language: str | None = Field(
+        default=None,
+        description=(
+            "ISO-639-1 code of the language THIS QUERY IS WRITTEN IN — not the "
+            "language of the speeches being asked for, which is 'lang'. The two are "
+            "independent: 'zer esan zuten espainolez' is written in Basque "
+            "(query_language 'eu') while asking for Spanish speeches (lang 'es'). "
+            "Null when the query is too short or ambiguous to tell, which is a "
+            "legitimate answer and never a reason to refuse."))
     legislature: str | None = Field(
         default=None,
         description="Legislature number only if explicitly stated. Null otherwise.")

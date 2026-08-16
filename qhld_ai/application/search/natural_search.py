@@ -23,7 +23,7 @@ from langsmith import traceable
 
 from qhld_ai.application.search.resolve_entities import EntityResolver, Resolution
 from qhld_ai.domain.entities import normalize_entity
-from qhld_ai.domain.errors import NotASpeechQuery
+from qhld_ai.domain.errors import NotASpeechQuery, UnsupportedLanguage
 from qhld_ai.domain.ports.query_parser import ParsedQuery
 from qhld_ai.infrastructure.config.settings import get_settings
 from qhld_ai.infrastructure.queryparsing.factory import create_query_parser_from_env
@@ -123,6 +123,30 @@ class NaturalSearchSpeeches:
         show up per query in the search trace."""
         return self.resolver().resolve(parsed)
 
+    def _check_language(self, query, parsed):
+        """Refuse a query written in a language the product does not serve.
+
+        Runs AFTER the intent gate, so an English injection stays "not a search"
+        rather than becoming "wrong language" — the more serious classification
+        wins — and BEFORE resolution, since nothing need be resolved for a query
+        about to be refused.
+
+        FAILS OPEN twice over: an empty allow-list disables the check entirely,
+        and a null verdict serves the query. The parser answers null whenever the
+        text is too short to tell, and refusing on an uncertain read is precisely
+        the failure that ruled out doing this with a language detector — measured
+        2026-08-16, py3langid called "Sánchez" Hungarian at 0.99 confidence and a
+        well-formed Catalan query Aragonese at 1.00. A refusal fails closed, so a
+        user who loses their search to a bad guess cannot tell it from the corpus
+        simply not covering them.
+        """
+        allowed = self.settings.search_allowed_languages
+        language = parsed.query_language
+        if not allowed or not language:
+            return
+        if language.strip().lower() not in {code.lower() for code in allowed}:
+            raise UnsupportedLanguage(query, language)
+
     def _prepare(self, query, parsed):
         """Shared prelude of ``execute`` and ``passages``: parse-gate, resolve,
         then derive the residual semantic query and the relevance-floor decision.
@@ -135,6 +159,7 @@ class NaturalSearchSpeeches:
             # assistant): reject outright rather than retrieve on nonsense. The
             # flag rides on the parsed object, so a reused parse is covered too.
             raise NotASpeechQuery(query)
+        self._check_language(query, parsed)
         resolution = self._resolve(parsed)
         # Unresolved values are the raw material for catalog curation (a missing
         # alias scores a near miss; an out-of-catalog person scores low), so keep

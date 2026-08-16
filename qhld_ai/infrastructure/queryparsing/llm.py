@@ -92,6 +92,12 @@ adverbios vagos SIN intervalo definido ('últimamente', 'hace poco', 'en los \
 últimos tiempos') NO son un rango de fechas: deja date_from y date_to en null. \
 Null también si no hay ninguna restricción temporal.
 - lang, legislature: solo si se indican explícitamente.
+- query_language: el código ISO-639-1 del idioma EN QUE ESTÁ ESCRITA la consulta. \
+NO es el idioma de las intervenciones que se buscan (eso es `lang`) y son \
+independientes: 'zer esan zuten espainolez' está escrita en euskera \
+(query_language 'eu') y pide intervenciones en castellano (lang 'es'). Devuelve \
+null si la consulta es demasiado corta o ambigua para saberlo — un nombre propio \
+suelto ('Sánchez', 'Feijóo') o una sola palabra no bastan.
 """
 
 

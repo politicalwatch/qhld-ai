@@ -80,6 +80,18 @@ class Settings(BaseSettings):
     query_parser_llm_model: str = ""
     query_parser_llm_reasoning_effort: str = ""
 
+    # Languages a query may be WRITTEN IN (JSON list, e.g. '["es","ca"]'). A query
+    # in anything else is refused before retrieval, because the product serves the
+    # languages of the Spanish Parliament and nothing else. Unrelated to the `lang`
+    # FILTER, which is the language of the speeches being asked for — a Basque
+    # query may legitimately ask for Spanish speeches.
+    # An EMPTY list disables the check, like reranker_score_floor = 0.0 disables
+    # the floor. The check also fails open on a null verdict: the parser answers
+    # null whenever a query is too short to tell, and refusing on an uncertain read
+    # is exactly the failure that ruled out doing this with a language detector
+    # (it called "Sánchez" Hungarian at 0.99 confidence).
+    search_allowed_languages: list[str] = ["es", "ca", "gl", "eu"]
+
     # Cross-encoder reranker. "noop" leaves bi-encoder order
     # untouched (the clean baseline); any other provider over-fetches
     # reranker_top_n passages and reorders them on (query, passage) relevance.
