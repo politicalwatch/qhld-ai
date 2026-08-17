@@ -7,6 +7,8 @@ anything about it meant asserting about a subprocess.
 """
 
 import math
+from fractions import Fraction
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -107,6 +109,160 @@ def test_a_file_that_is_not_media_raises_audio_decode_error(tmp_path):
 
     with pytest.raises(AudioDecodeError):
         decode_pcm(str(junk))
+
+
+# ---- undecodable packets -----------------------------------------------------
+#
+# The Congress publishes clips whose last packet is corrupt, and decoding the stream as
+# one unit lost the whole speech over it. libav's real behaviour on those files is
+# already measured (one bad packet in 13,525, at the very end, 99.8% and 100.0% of the
+# audio readable); what these tests pin is our side of it — what we keep, and when we
+# refuse to keep anything. A synthesised container cannot produce a mid-decode failure
+# (a short wav simply decodes less, having no per-packet integrity), so the failure is
+# injected instead.
+
+class _FakePacket:
+    def __init__(self, frames=(), error=None, pts=None, time_base=Fraction(1, 1000)):
+        self._frames = frames
+        self._error = error
+        self.pts = pts
+        self.time_base = time_base
+
+    def decode(self):
+        if self._error is not None:
+            raise self._error
+        return self._frames
+
+
+def _invalid_data():
+    import av
+
+    return av.error.InvalidDataError(
+        1094995529, "Invalid data found when processing input")
+
+
+class _FakeContainer:
+    """Just enough of a container for ``decode_pcm``, yielding real audio frames so the
+    genuine resampler still runs — only the failure is a fake."""
+
+    def __init__(self, packets, duration):
+        self._packets = packets
+        self.duration = None
+        stream = SimpleNamespace(
+            rate=SAMPLE_RATE, time_base=Fraction(1, 1000),
+            duration=None if duration is None else int(duration * 1000))
+        self.streams = SimpleNamespace(audio=[stream])
+
+    def demux(self, stream):
+        return iter(self._packets)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _frame(seconds, rate=SAMPLE_RATE):
+    import av
+
+    total = int(rate * seconds)
+    samples = np.zeros((1, total), dtype=np.int16)
+    samples[0, ::100] = 8000  # some signal, so silence-trimming logic can't hide a bug
+    frame = av.AudioFrame.from_ndarray(samples, format="s16", layout="mono")
+    frame.rate = rate
+    return frame
+
+
+def _patch_container(monkeypatch, packets, duration):
+    import av
+
+    monkeypatch.setattr(
+        av, "open", lambda *a, **kw: _FakeContainer(packets, duration))
+
+
+def _good(seconds, at_ms):
+    return _FakePacket(frames=[_frame(seconds)], pts=at_ms)
+
+
+def test_a_corrupt_final_packet_still_yields_the_speech(monkeypatch):
+    # The 111 interventions this exists for: everything decodes but the last packet.
+    packets = [_good(1.0, 0), _good(1.0, 1000), _good(1.0, 2000),
+               _FakePacket(error=_invalid_data(), pts=3000)]
+    _patch_container(monkeypatch, packets, duration=3.0)
+
+    samples = decode_pcm("corrupt-tail.mp4")
+
+    assert len(samples) == pytest.approx(SAMPLE_RATE * 3.0, rel=0.02)
+
+
+def test_a_gap_in_the_middle_is_refused_where_the_same_loss_at_the_tail_is_not(
+        monkeypatch):
+    # Identical amount of audio lost; only the position differs. At the end it shifts no
+    # cue, in the middle it drags every later cue earlier by the same amount.
+    packets = [_good(1.0, 0), _FakePacket(error=_invalid_data(), pts=1000),
+               _good(1.0, 1500)]
+    _patch_container(monkeypatch, packets, duration=2.5)
+
+    with pytest.raises(AudioDecodeError, match="mid-clip"):
+        decode_pcm("gap-in-the-middle.mp4")
+
+
+def test_audio_lost_beyond_the_tolerance_is_refused(monkeypatch):
+    # Most of the clip is gone. Aligning the whole transcript against it would not fail,
+    # it would return confident, wrong timings — so refusing is the only safe answer.
+    packets = [_good(1.0, 0), _FakePacket(error=_invalid_data(), pts=9500)]
+    _patch_container(monkeypatch, packets, duration=10.0)
+
+    with pytest.raises(AudioDecodeError, match="too much to align against"):
+        decode_pcm("mostly-broken.mp4")
+
+
+def test_a_skipped_packet_without_a_declared_duration_is_refused(monkeypatch):
+    # Nothing to check the remainder against, so the skip cannot be shown harmless.
+    packets = [_good(1.0, 0), _FakePacket(error=_invalid_data(), pts=1000)]
+    _patch_container(monkeypatch, packets, duration=None)
+
+    with pytest.raises(AudioDecodeError, match="no declared duration"):
+        decode_pcm("no-duration.mp4")
+
+
+def test_a_shredded_stream_is_refused_however_little_time_it_loses(monkeypatch):
+    # Each skip is a splice, and a splice is a transient the acoustic model reads as
+    # speech, so the count matters independently of the seconds.
+    packets = [_good(1.0, 0)]
+    packets += [_FakePacket(error=_invalid_data(), pts=1000 + i) for i in range(6)]
+    _patch_container(monkeypatch, packets, duration=1.0)
+
+    with pytest.raises(AudioDecodeError, match="too damaged"):
+        decode_pcm("shredded.mp4")
+
+
+def test_a_dying_download_is_not_mistaken_for_a_corrupt_packet(monkeypatch):
+    # The regression this guard exists to avoid: a stalled or reset connection is an
+    # FFmpegError too, so tolerating that base class would turn a download dying at 80%
+    # into silently truncated audio that a generous header would wave through.
+    import av
+
+    for error in (av.error.TimeoutError(110, "timed out"),
+                  av.error.ConnectionResetError(104, "reset by peer"),
+                  av.error.HTTPError(1, "bad gateway")):
+        packets = [_good(1.0, 0), _FakePacket(error=error, pts=1000)]
+        _patch_container(monkeypatch, packets, duration=1.5)
+
+        with pytest.raises(AudioDecodeError, match="could not decode"):
+            decode_pcm("dying-download.mp4")
+
+
+def test_a_clean_decode_is_unaffected_by_the_tolerant_path(monkeypatch):
+    # No packet fails, so no coverage check runs and the result is the plain decode.
+    packets = [_good(0.5, i * 500) for i in range(4)]
+    _patch_container(monkeypatch, packets, duration=2.0)
+
+    samples = decode_pcm("clean.mp4")
+
+    assert len(samples) == pytest.approx(SAMPLE_RATE * 2.0, rel=0.02)
+    assert samples.dtype == np.float32
 
 
 def test_probe_duration_reads_the_length_without_decoding(tmp_path):
