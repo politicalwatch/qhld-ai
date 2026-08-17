@@ -23,7 +23,8 @@ from langsmith import traceable
 
 from qhld_ai.application.search.resolve_entities import EntityResolver, Resolution
 from qhld_ai.domain.entities import normalize_entity
-from qhld_ai.domain.errors import NotASpeechQuery, UnsupportedLanguage
+from qhld_ai.domain.errors import (
+    NotASpeechQuery, PromptInjection, UnsupportedLanguage)
 from qhld_ai.domain.ports.query_parser import ParsedQuery
 from qhld_ai.infrastructure.config.settings import get_settings
 from qhld_ai.infrastructure.queryparsing.factory import create_query_parser_from_env
@@ -154,10 +155,27 @@ class NaturalSearchSpeeches:
         ``(resolution, filters, semantic, apply_floor)`` otherwise. An empty
         ``semantic`` is a pure-filter query, which the callers browse instead of
         searching."""
+        if getattr(parsed, "is_hostile", False):
+            # Checked FIRST because it is the most serious classification and a
+            # strict subset of the next one: an unambiguous attempt to manipulate
+            # the system is also not a search, and filing it as merely that would
+            # lose the only distinction a ban may act on.
+            #
+            # ``getattr`` rather than an attribute access: a parse restored from a
+            # cache written before this field existed has no ``is_hostile``, and
+            # defaulting such a parse to "not hostile" is the right way to be
+            # wrong — it costs a ban we could have applied, not a user we should
+            # not have banned.
+            raise PromptInjection(query)
         if not parsed.is_speech_search:
-            # Not a search at all (a command, an injection, a question to the
-            # assistant): reject outright rather than retrieve on nonsense. The
-            # flag rides on the parsed object, so a reused parse is covered too.
+            # Not a search at all (a command, an injection we did not recognise as
+            # one, a question to the assistant): reject outright rather than
+            # retrieve on nonsense. The flag rides on the parsed object, so a
+            # reused parse is covered too.
+            #
+            # This is also the backstop that makes the hostile class safe to keep
+            # narrow: an attack that fails the test above still lands here and is
+            # still refused. The user sees the same words either way.
             raise NotASpeechQuery(query)
         self._check_language(query, parsed)
         resolution = self._resolve(parsed)
