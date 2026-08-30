@@ -12,12 +12,12 @@ requires-python = ">=3.12"
 # so each image installs only what it serves (see the profiles: backend/engine/
 # dev/all). The llm/embeddings factories skip providers whose SDK is absent.
 dependencies = [
-    "pydantic-settings==2.14.2",
+    "pydantic-settings==2.15.0",
     "thefuzz==0.22.1",
-    "langchain-core==1.5.0",
+    "langchain-core==1.6.1",
     "qhld-data",
     "py3langid==0.3.0",
-    "qdrant-client==1.18.0",
+    "qdrant-client==1.19.0",
     "httpx",
     "langsmith>=0.10",
 ]
@@ -27,10 +27,10 @@ dependencies = [
 # LLM + embeddings providers. langchain-openai also serves Novita (its adapters
 # wrap ChatOpenAI/OpenAIEmbeddings against Novita's OpenAI-compatible endpoint);
 # langchain-ollama also serves vMLX.
-openai = ["langchain-openai==1.4.0"]
+openai = ["langchain-openai==1.6.0"]
 ollama = ["langchain-ollama==1.1.0"]
-anthropic = ["langchain-anthropic==1.4.8"]
-google = ["langchain-google-genai==4.2.7"]
+anthropic = ["langchain-anthropic==1.7.0"]
+google = ["langchain-google-genai==4.3.7"]
 mistral = ["langchain-mistralai==1.1.6"]
 # Rerankers. Hosted jina/novita need no SDK (direct httpx, in core). cohere and
 # voyage wrap vendor SDKs; reranker-local is the in-process cross-encoder and
