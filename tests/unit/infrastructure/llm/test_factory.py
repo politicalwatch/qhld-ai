@@ -95,24 +95,32 @@ def test_reasoning_effort_is_sent_only_when_configured(provider, key):
     assert setted.reasoning_effort == "low"
 
 
-def test_gpt5_keeps_temperature_only_at_effort_none():
-    """Pins a langchain behaviour we rely on rather than implement.
-
-    langchain drops temperature for gpt-5* non-chat models at every effort except
-    "none", and drops it SILENTLY. So "no reasoning" is also the only setting
-    where our temperature=0.0 actually reaches the API. If an upgrade changes
-    this, the adapter's comment goes stale and the parser's determinism story
-    changes with it — so fail here instead of finding out from a metric.
+@pytest.mark.parametrize("model", ["gpt-5.4-nano-2026-03-17", "gpt-6-luna"])
+def test_reasoning_models_keep_temperature_only_at_effort_none(model):
+    """Any other effort — or none configured, which means the model's own default
+    — gets a 400 for temperature=0.0 on these families. langchain strips it for
+    gpt-5 but not gpt-6, so this also fails if the adapter's family list stops
+    covering a model we use. "none" is the only setting where our temperature
+    reaches the API, which is the parser's whole determinism story.
     """
     def build(effort):
         return create_llm_from_env(
-            _settings(llm_provider="openai", llm_model="gpt-5.4-nano-2026-03-17",
+            _settings(llm_provider="openai", llm_model=model,
                       llm_temperature=0.0, llm_reasoning_effort=effort,
                       openai_api_key="x"))
 
     assert build("none").temperature == pytest.approx(0.0)
     for effort in ("", "low", "medium", "high"):
-        assert build(effort).temperature is None, effort
+        llm = build(effort)
+        assert llm.temperature is None, effort
+        assert "temperature" not in llm._get_request_payload([("user", "q")]), effort
+
+
+def test_non_reasoning_openai_models_keep_temperature():
+    llm = create_llm_from_env(
+        _settings(llm_provider="openai", llm_model="gpt-4.1-mini",
+                  llm_temperature=0.0, openai_api_key="x"))
+    assert llm.temperature == pytest.approx(0.0)
 
 
 def test_novita_uses_its_own_key_and_the_hosted_endpoint():
