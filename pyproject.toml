@@ -14,10 +14,10 @@ requires-python = ">=3.12"
 dependencies = [
     "pydantic-settings==2.15.0",
     "thefuzz==0.22.1",
-    "langchain-core==1.6.1",
+    "langchain-core==1.6.4",
     "qhld-data",
-    "py3langid==0.3.0",
-    "qdrant-client==1.19.0",
+    "py3langid==0.4.0",
+    "qdrant-client==1.19.1",
     "httpx",
     "langsmith>=0.10",
 ]
