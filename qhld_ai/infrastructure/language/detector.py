@@ -28,7 +28,7 @@ def _get_identifier():
     if _identifier is None:
         from py3langid.langid import LanguageIdentifier, MODEL_FILE
 
-        identifier = LanguageIdentifier.from_pickled_model(
+        identifier = LanguageIdentifier.from_model_file(
             MODEL_FILE, norm_probs=True)
         identifier.set_languages(_LANGUAGES)
         _identifier = identifier
