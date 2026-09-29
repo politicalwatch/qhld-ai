@@ -95,7 +95,8 @@ class VectorStorePort(Protocol):
 
         ``filters`` is ``{key: value}``: a scalar value is an exact match; a list
         matches any of its values; ``{"all": [...]}`` requires a list payload to
-        contain every value (e.g. all mentioned persons); any other dict value is
+        contain every value (e.g. all mentioned persons), an element that is itself a
+        list being satisfied by any of its values; any other dict value is
         a numeric range with ``gte``/``gt``/``lte``/``lt`` keys, e.g.
         ``{"date": {"gte": 20250403, "lte": 20250703}}`` (``date`` is a YYYYMMDD int).
 

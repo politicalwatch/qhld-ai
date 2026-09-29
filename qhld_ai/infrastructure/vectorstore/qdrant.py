@@ -488,7 +488,8 @@ class QdrantAdapter(VectorStorePort):
         """Translate a ``{key: value}`` filter dict into Qdrant conditions. A scalar
         value is an exact ``MatchValue``; a list is a ``MatchAny`` (any-of); a dict
         is either ``{"all": [...]}`` — one condition per element, so a list payload
-        must contain every one — or a numeric ``Range`` whose keys are
+        must contain every one (an element that is itself a list is an any-of within
+        the conjunction) — or a numeric ``Range`` whose keys are
         ``gte``/``gt``/``lte``/``lt`` (used for the ``date`` YYYYMMDD int)."""
         return [
             condition
@@ -501,7 +502,9 @@ class QdrantAdapter(VectorStorePort):
         if isinstance(value, dict):
             if "all" in value:
                 return [
-                    models.FieldCondition(key=key, match=models.MatchValue(value=v))
+                    models.FieldCondition(key=key, match=models.MatchAny(any=list(v)))
+                    if isinstance(v, (list, tuple, set))
+                    else models.FieldCondition(key=key, match=models.MatchValue(value=v))
                     for v in value["all"]
                 ]
             allowed = {"gte", "gt", "lte", "lt"}

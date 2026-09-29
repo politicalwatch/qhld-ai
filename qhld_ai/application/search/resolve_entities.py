@@ -36,7 +36,9 @@ service maps that onto what the index actually *stores*:
 When several values resolve for one field, the filter value becomes a list (the
 store treats it as any-of); mentioned persons instead honour the parsed
 ``mentions_mode`` — ``{"all": [ids]}`` requires every person to be mentioned,
-a plain list accepts any of them.
+a plain list accepts any of them. A mentioned surname several people share fails
+open like a speaker's: it filters on all of them, as a list nested inside ``all``
+when other people are required too.
 
 Because every one of these fields resolves against the very values the corpus was
 tagged/indexed with, a value that resolves to nothing is not ignorable noise — the
@@ -515,34 +517,61 @@ class EntityResolver:
             for raw in raws:
                 result.notes.append(f"mentions: '{raw}' ignored — no person catalog")
             return
-        ids, names, misses = [], {}, []
+        # One member per raw value: a person id, or the list of ids a shared surname tied.
+        members, names, misses = [], {}, []
         for raw in raws:
             match = match_person(raw, self._person_index, self._mention_threshold)
             if match.entry:
                 result.notes.append(
                     f"mentions: '{raw}' → '{match.entry.name}' ({match.entry.person_type})")
-                if match.entry.person_id not in ids:
-                    ids.append(match.entry.person_id)
+                if match.entry.person_id not in members:
+                    members.append(match.entry.person_id)
                 names[match.entry.person_id] = match.entry.name
+            elif len(match.candidates) > 1 and match.best_score >= self._mention_threshold:
+                members.append(self._mention_tie(result, raw, match, names))
             else:
                 misses.append((raw, self._person_suggestion(match)))
         # ``all`` requires every person, so a single miss is unsatisfiable; ``any``
         # survives on the resolved subset and only blocks when nobody resolved.
-        blocking = bool(misses) if mode != "any" else not ids
+        blocking = bool(misses) if mode != "any" else not members
         for raw, suggestion in misses:
             _record_unresolved(result, "mentions", raw, blocking=blocking,
                                suggestion=suggestion)
-        if blocking or not ids:
+        if blocking or not members:
             return
-        if len(ids) == 1:
-            result.filters["mentions"] = ids[0]
+        ids = sorted({person_id for member in members
+                      for person_id in ([member] if isinstance(member, str) else member)})
+        if len(members) == 1:
+            member = members[0]
+            result.filters["mentions"] = member if isinstance(member, str) else ids
         elif mode == "any":
-            result.filters["mentions"] = sorted(ids)
+            result.filters["mentions"] = ids
         else:
-            result.filters["mentions"] = {"all": sorted(ids)}
+            # A tied surname stays an any-of INSIDE the conjunction: "Feijóo and Sánchez"
+            # is Feijóo and any one of the Sánchezes, not all of them at once.
+            result.filters["mentions"] = {"all": sorted(
+                members, key=lambda member: member if isinstance(member, str) else member[0])}
         # Alongside the filter, never without it: the ids are the query, the names are
         # only how to say them back.
         result.labels["mentions"] = names
+
+    def _mention_tie(self, result, raw, match, names):
+        """Fail open on a mentioned surname several people share, as ``_break_speaker_tie``
+        does for a speaker: filter on all of them and report the tie, so the client offers
+        to narrow instead of the search returning nothing.
+
+        ``match_person`` has already narrowed to first-surname bearers, so ``candidates``
+        is only who is still tied after that. The same rule as for speakers applies: no
+        prior removes anybody, office only orders the list the client offers."""
+        by_name = {entry.name: entry for entry in match.candidates}
+        ordered = self._by_prominence(list(by_name))
+        result.ambiguous.append(
+            AmbiguousMatch("mentions", raw, ordered[0], ordered, kept=list(ordered)))
+        result.notes.append(
+            f"mentions: '{raw}' names {len(ordered)} people — showing all of them")
+        for name in ordered:
+            names[by_name[name].person_id] = name
+        return sorted(by_name[name].person_id for name in ordered)
 
     def _resolve_entities(self, result, raws, mode):
         vocab = {v for v in self._distinct("entities") if v}
@@ -588,13 +617,12 @@ class EntityResolver:
         return None, (f"'{match[0]}' ({match[1]})" if match else None)
 
     def _person_suggestion(self, match: PersonMatch) -> str | None:
-        """Human-readable hint for a failed person match: the tied names when the
-        span was ambiguous, the closest near-miss otherwise."""
+        """The closest near-miss for a failed person match, in the quoted form a client
+        offers as "did you mean". A tie never gets here — ``_mention_tie`` resolves it —
+        and a match that cleared the threshold has no near miss to offer."""
         names = match.candidate_names
-        if not names:
+        if not names or match.best_score >= self._mention_threshold:
             return None
-        if match.best_score >= self._mention_threshold:
-            return "ambiguous: " + " / ".join(f"'{name}'" for name in names)
         return f"'{names[0]}' ({match.best_score})"
 
     def _resolve_constituencies(self, result, raws):

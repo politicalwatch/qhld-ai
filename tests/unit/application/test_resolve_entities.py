@@ -843,16 +843,45 @@ def test_furniture_entity_blocks(resolver):
     assert r.blocked
 
 
-def test_ambiguous_mention_blocks_with_candidates():
-    resolver = _resolver(deputies=[
-        _FakeDeputy("dep-g1", "García López, Juan"),
-        _FakeDeputy("dep-g2", "García Ruiz, Ana"),
-    ])
-    r = resolver.resolve(ParsedQuery(semantic_query="x", mentioned_persons=["García"]))
-    assert "mentions" not in r.filters
-    assert r.blocked
-    assert "ambiguous" in r.unresolved[0].suggestion
-    assert "García López, Juan" in r.unresolved[0].suggestion
+_GARCIAS = [
+    _FakeDeputy("dep-g1", "García López, Juan"),
+    _FakeDeputy("dep-g2", "García Ruiz, Ana"),
+    _FakeDeputy("dep-montero", "Montero Cuadrado, María Jesús"),
+]
+
+
+def test_ambiguous_mention_fails_open_on_everyone_tied():
+    # Like a tied speaker: the search stays open on all of them and the tie is reported
+    # for the client to offer, instead of blocking on a "did you mean" naming everybody.
+    r = _resolver(deputies=_GARCIAS).resolve(
+        ParsedQuery(semantic_query="x", mentioned_persons=["García"]))
+    assert r.filters["mentions"] == ["dep-g1", "dep-g2"]
+    assert not r.blocked and not r.unresolved
+    match = r.ambiguous[0]
+    assert (match.field, match.value) == ("mentions", "García")
+    assert match.kept == match.tied == ["García López, Juan", "García Ruiz, Ana"]
+    assert r.labels["mentions"] == {"dep-g1": "García López, Juan",
+                                    "dep-g2": "García Ruiz, Ana"}
+
+
+def test_narrowing_a_mention_tie_by_full_name_resolves_it():
+    # What the client sends back when the user picks one of the offered names.
+    r = _resolver(deputies=_GARCIAS).resolve(
+        ParsedQuery(semantic_query="x", mentioned_persons=["García Ruiz, Ana"]))
+    assert r.filters["mentions"] == "dep-g2"
+    assert not r.ambiguous
+
+
+def test_a_tied_mention_is_an_any_of_inside_all_mode():
+    r = _resolver(deputies=_GARCIAS).resolve(
+        ParsedQuery(semantic_query="x", mentioned_persons=["Montero", "García"]))
+    assert r.filters["mentions"] == {"all": [["dep-g1", "dep-g2"], "dep-montero"]}
+
+
+def test_a_tied_mention_joins_the_union_in_any_mode():
+    r = _resolver(deputies=_GARCIAS).resolve(ParsedQuery(
+        semantic_query="x", mentioned_persons=["Montero", "García"], mentions_mode="any"))
+    assert r.filters["mentions"] == ["dep-g1", "dep-g2", "dep-montero"]
 
 
 def test_mentioned_person_ignored_without_deputies_catalog():

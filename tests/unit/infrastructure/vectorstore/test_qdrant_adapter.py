@@ -85,6 +85,19 @@ def test_search_all_filter_requires_every_value_in_list_payload(adapter):
     assert [h.payload["speech_id"] for h in hits] == ["both"]
 
 
+def test_search_all_filter_treats_a_nested_list_as_any_of(adapter):
+    # A mentioned surname several people share: Ayuso and any one of the Sánchezes.
+    adapter.ensure_collection("c", 3)
+    adapter.upsert("c", [
+        _point({"speech_id": "pedro", "mentions": ["ayuso", "sanchez-pedro"]}),
+        _point({"speech_id": "serna", "mentions": ["ayuso", "sanchez-serna"]}),
+        _point({"speech_id": "alone", "mentions": ["sanchez-pedro"]}),
+    ])
+    hits = adapter.search("c", [0.1, 0.2, 0.3], k=5, filters={
+        "mentions": {"all": ["ayuso", ["sanchez-pedro", "sanchez-serna"]]}})
+    assert sorted(h.payload["speech_id"] for h in hits) == ["pedro", "serna"]
+
+
 def test_search_combines_range_and_exact_filters(adapter):
     adapter.ensure_collection("c", 3)
     adapter.upsert("c", [
