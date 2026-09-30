@@ -98,6 +98,15 @@ class Settings(BaseSettings):
     reranker_provider: str = "noop"
     reranker_model: str = ""
     reranker_top_n: int = 50
+    # Breadth of the grouped (speech-level) search's rerank pool: how many
+    # candidate speeches, one passage each, the bi-encoder hands the reranker on
+    # top of the deep pool of twice the page. A speech outside both is never
+    # scored, so without it the page held only the speeches the bi-encoder already
+    # ranked near the top — and ``has_more`` was decided from that same pool.
+    grouped_rerank_speeches: int = 100
+    # Passages per speech the grouped top-up retrieves to refill a short card, by
+    # bi-encoder rank; 0 retrieves (and reranks) every passage of the speech.
+    grouped_topup_passages: int = 8
     # Rerankers served over HTTP by a LOCAL server: the model stays loaded in
     # its own process instead of being loaded in-process by every caller. For
     # "tei" the base URL is the server root (the adapter calls its fixed

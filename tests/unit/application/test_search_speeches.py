@@ -454,6 +454,57 @@ class _CountingReranker:
         return rescored[:k]
 
 
+class _PoolStore:
+    """Records every grouped retrieval; the wide call reveals one extra speech."""
+
+    def __init__(self):
+        self.calls = []
+
+    def search_grouped(self, name, vector, group_by, limit, group_size,
+                       filters=None, exclude=None):
+        self.calls.append((limit, group_size))
+        if group_size == 1:  # wide pool: A again (deep wins) plus B
+            return [SpeechGroup(speech_id="A", score=0.5, highlights=[_passage("a9", "A")]),
+                    SpeechGroup(speech_id="B", score=0.4, highlights=[_passage("b1", "B")])]
+        return [SpeechGroup(speech_id="A", score=0.9,
+                            highlights=[_passage("a1", "A"), _passage("a2", "A")])]
+
+    def search(self, name, vector, k, filters=None):
+        self.topped_up = filters["speech_id"]
+        return [_passage("b1", "B")]  # B has nothing beyond its one pooled passage
+
+
+def test_reranked_grouped_search_adds_a_wide_pool_to_the_deep_one():
+    # The reranker can only promote a speech the bi-encoder handed it: the deep
+    # pool (twice the page) keeps several passages per speech, the wide pool adds
+    # many more speeches at one passage each — and a speech in both keeps its
+    # deep passages rather than being scored twice.
+    store = _PoolStore()
+    reranker = _CountingReranker({"a1": 0.9, "a2": 0.8, "b1": 0.7})
+    service = SearchSpeeches(
+        settings=_settings(grouped_rerank_speeches=100, grouped_topup_passages=0),
+        embedder=_FakeEmbedder(), store=store, reranker=reranker)
+
+    groups = service.search_grouped("q", page_size=13, highlights=2)
+
+    assert store.calls == [(26, 5), (100, 1)]
+    assert reranker.batches == [["a1", "a2", "b1"]]   # a9 (A's wide passage) dropped
+    assert [g.speech_id for g in groups] == ["A", "B"]
+    # A one-passage card from the wide pool is refillable: its speech may hold more
+    assert store.topped_up == ["B"]
+
+
+def test_no_wide_pool_when_it_is_not_wider_than_the_deep_one():
+    store = _PoolStore()
+    service = SearchSpeeches(
+        settings=_settings(grouped_rerank_speeches=26), embedder=_FakeEmbedder(),
+        store=store, reranker=_CountingReranker({"a1": 0.9, "a2": 0.8}))
+
+    service.search_grouped("q", page_size=13, highlights=2)
+
+    assert store.calls == [(26, 5)]
+
+
 def test_deficient_card_is_refilled_from_the_rest_of_its_speech():
     # Only a1 clears the floor in the pooled passages, so the card shows 1 of 3 —
     # but the speech has two more above-floor passages the pool never returned.
@@ -461,8 +512,9 @@ def test_deficient_card_is_refilled_from_the_rest_of_its_speech():
     reranker = _CountingReranker(
         {"a1": 0.9, "a2": 0.05, "a3": 0.05, "a4": 0.05, "a5": 0.05,
          "a90": 0.8, "a91": 0.7})
-    service = SearchSpeeches(settings=_settings(reranker_score_floor=0.15),
-                             embedder=_FakeEmbedder(), store=store, reranker=reranker)
+    service = SearchSpeeches(
+        settings=_settings(reranker_score_floor=0.15, grouped_topup_passages=0),
+        embedder=_FakeEmbedder(), store=store, reranker=reranker)
 
     groups = service.search_grouped("q", page_size=5, highlights=3)
 
@@ -501,8 +553,9 @@ def test_full_card_costs_no_extra_call():
     # retrieval and no second rerank.
     store = _SaturatedStore()
     reranker = _CountingReranker({f"a{i}": 0.9 - i / 100 for i in range(1, 6)})
-    service = SearchSpeeches(settings=_settings(reranker_score_floor=0.15),
-                             embedder=_FakeEmbedder(), store=store, reranker=reranker)
+    service = SearchSpeeches(
+        settings=_settings(reranker_score_floor=0.15),
+        embedder=_FakeEmbedder(), store=store, reranker=reranker)
 
     groups = service.search_grouped("q", page_size=5, highlights=3)
 
@@ -518,12 +571,41 @@ def test_top_up_keeps_the_query_filters():
     reranker = _CountingReranker(
         {"a1": 0.9, "a2": 0.05, "a3": 0.05, "a4": 0.05, "a5": 0.05,
          "a90": 0.8, "a91": 0.7})
-    service = SearchSpeeches(settings=_settings(reranker_score_floor=0.15),
-                             embedder=_FakeEmbedder(), store=store, reranker=reranker)
+    service = SearchSpeeches(
+        settings=_settings(reranker_score_floor=0.15, grouped_topup_passages=0),
+        embedder=_FakeEmbedder(), store=store, reranker=reranker)
 
     service.search_grouped("q", page_size=5, highlights=3, filters={"group": "GS"})
 
     assert store.searches[0][1] == {"group": "GS", "speech_id": ["A"]}
+
+
+def test_capped_top_up_rescores_only_each_speechs_next_best_passages():
+    # With a cap, the refill retrieves each short card's next-best passages as a
+    # grouped search scoped to the page's speeches — not every passage they hold.
+    class _Store:
+        def __init__(self):
+            self.grouped = []
+
+        def search_grouped(self, name, vector, group_by, limit, group_size,
+                           filters=None, exclude=None):
+            self.grouped.append((limit, group_size, filters))
+            count = group_size if filters and "speech_id" in filters else 5
+            return [SpeechGroup(speech_id="A", score=0.5, highlights=[
+                _passage(f"a{i}", "A") for i in range(1, count + 1)])]
+
+    store = _Store()
+    reranker = _CountingReranker({"a1": 0.9, "a6": 0.8, "a7": 0.7})
+    service = SearchSpeeches(
+        settings=_settings(reranker_score_floor=0.15, grouped_rerank_speeches=0,
+                           grouped_topup_passages=8),
+        embedder=_FakeEmbedder(), store=store, reranker=reranker)
+
+    groups = service.search_grouped("q", page_size=5, highlights=3, filters={"group": "GS"})
+
+    assert store.grouped[-1] == (1, 8, {"group": "GS", "speech_id": ["A"]})
+    assert reranker.batches[1] == ["a6", "a7", "a8"]   # only the unscored ones
+    assert [h.id for h in groups[0].highlights] == ["a1", "a6", "a7"]
 
 
 # --- Browse: no query, no vector, no rerank ----------------------------------

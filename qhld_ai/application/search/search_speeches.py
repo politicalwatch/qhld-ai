@@ -238,8 +238,20 @@ class SearchSpeeches:
                 exclude=exclude,
                 **extra,
             )
-        # Over-fetch groups (and highlights per group) so the reranker can promote
-        # a speech the bi-encoder ranked lower. All groups' highlights are pooled
+        # Over-fetch so the reranker can promote a speech the bi-encoder ranked
+        # lower — a speech outside the pool is never scored at all, and the pool
+        # also bounds what ``has_more`` can see. Two pools, because depth and
+        # breadth fail differently. The DEEP pool (twice the page, several
+        # passages each) finds the speech whose best passage the bi-encoder ranked
+        # low within it, which a filtered query ("sequía en Málaga") depends on.
+        # The WIDE pool (many speeches, one passage each) finds the relevant
+        # speech the bi-encoder ranked below the page, which a broad query
+        # ("pisos turísticos") depends on: measured 2026-09-30, the deep pool alone
+        # showed 3–6 of the true first-page speeches, the wide pool alone lost
+        # hits of the filtered queries, and neither loses anything combined. A
+        # speech in both keeps its deep pool.
+        #
+        # All groups' highlights are pooled
         # into ONE rerank call: a pointwise reranker scores each (query, passage)
         # pair independently, so the scores are identical to per-group calls —
         # and a reranker served over HTTP pays one round-trip per search instead
@@ -257,6 +269,25 @@ class SearchSpeeches:
             exclude=exclude,
             **extra,
         )
+        # A speech whose pool came back full may hold more passages than were
+        # scored; the top-up reads this to know which cards it may refill.
+        saturated = {group.speech_id for group in groups
+                     if len(group.highlights) == pool_size}
+        breadth = self.settings.grouped_rerank_speeches
+        if breadth > page_size * 2:
+            deep = {group.speech_id for group in groups}
+            wide = [group for group in self._store_search_grouped(
+                collection,
+                vector,
+                group_by="speech_id",
+                limit=breadth,
+                group_size=1,
+                filters=clean,
+                exclude=exclude,
+                **extra,
+            ) if group.speech_id not in deep]
+            groups += wide
+            saturated |= {group.speech_id for group in wide}
         pooled = [hit for group in groups for hit in group.highlights]
         rescored = self._rerank(query, pooled, len(pooled),
                                 lang=self._sibling_lang(clean),
@@ -275,9 +306,8 @@ class SearchSpeeches:
         reranked.sort(key=lambda group: group.score, reverse=True)
         page = reranked[:page_size]
         page = self._top_up(
-            query, collection, vector, clean, extra, page,
-            {source.speech_id: len(source.highlights) for source in groups},
-            pool_size, highlights, apply_floor, scored)
+            query, collection, vector, clean, extra, page, saturated,
+            highlights, apply_floor, scored)
         page.sort(key=lambda group: group.score, reverse=True)
         return page
 
@@ -375,18 +405,18 @@ class SearchSpeeches:
         top = same[:highlights]
         return SpeechGroup(speech_id=speech_id, score=top[0].score, highlights=top)
 
-    def _top_up(self, query, collection, vector, filters, extra, page, pool_sizes,
-                pool_size, highlights, apply_floor, scored):
+    def _top_up(self, query, collection, vector, filters, extra, page, saturated,
+                highlights, apply_floor, scored):
         """Refill cards showing fewer passages than their speech actually offers.
 
-        Grouped retrieval returns at most ``pool_size`` passages per speech, so a
+        Grouped retrieval returns a bounded pool of passages per speech, so a
         passage the bi-encoder ranked below that but the reranker scores above the
         floor reaches the detail page — which scores ALL of a speech's passages —
         and never the card. Cards short of ``highlights`` are refilled here from
         the rest of their own speech, costing one extra retrieval and one extra
         rerank for the whole page, both reusing the query vectors already computed.
 
-        A card whose pool came back short of ``pool_size`` is skipped: every
+        A card whose pool came back short (not in ``saturated``) is skipped: every
         passage of that speech was already scored, so nothing can be missing.
         Only the page's own cards are refilled — a speech that never made the page
         keeps the score its pooled passages earned. Refilling those too would mean
@@ -395,15 +425,25 @@ class SearchSpeeches:
         """
         deficient = [group for group in page
                      if len(group.highlights) < highlights
-                     and pool_sizes.get(group.speech_id) == pool_size]
+                     and group.speech_id in saturated]
         if not deficient:
             return page
         speech_ids = [group.speech_id for group in deficient]
-        # k is a ceiling the store API requires, not a passage cap: the speech_id
-        # filter narrows candidates to these speeches' own passages.
-        hits = self._store_search(
-            collection, vector, _TOPUP_K,
-            {**(filters or {}), "speech_id": speech_ids}, **extra)
+        scope = {**(filters or {}), "speech_id": speech_ids}
+        cap = self.settings.grouped_topup_passages
+        if cap:
+            # Each speech's next-best passages by bi-encoder, not all of them: a
+            # card refilled from the wide pool starts from one passage, and
+            # reranking the whole of twelve long speeches was most of the page's
+            # latency.
+            hits = [hit for group in self._store_search_grouped(
+                collection, vector, group_by="speech_id", limit=len(speech_ids),
+                group_size=cap, filters=scope, exclude=None, **extra)
+                for hit in group.highlights]
+        else:
+            # k is a ceiling the store API requires, not a passage cap: the
+            # speech_id filter narrows candidates to these speeches' own passages.
+            hits = self._store_search(collection, vector, _TOPUP_K, scope, **extra)
         fresh = [hit for hit in hits if hit.id not in scored]
         if not fresh:
             return page
