@@ -402,8 +402,15 @@ class SearchSpeeches:
             or [hit for hit in ranked if hit.payload.get("lang") == "es"]
             or ranked
         )
-        top = same[:highlights]
-        return SpeechGroup(speech_id=speech_id, score=top[0].score, highlights=top)
+        # Relevance picks the passages, reading order shows them: the card's
+        # passages then appear as they do in the speech (and on its detail page),
+        # instead of reshuffling whenever near-tied scores trade places — which a
+        # slightly different query, or the served reranker's jitter, is enough for.
+        top = sorted(
+            same[:highlights],
+            key=lambda hit: (hit.payload.get("block_index") or 0,
+                             hit.payload.get("chunk_index") or 0))
+        return SpeechGroup(speech_id=speech_id, score=same[0].score, highlights=top)
 
     def _top_up(self, query, collection, vector, filters, extra, page, saturated,
                 highlights, apply_floor, scored):

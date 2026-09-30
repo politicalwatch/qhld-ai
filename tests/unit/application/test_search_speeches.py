@@ -413,6 +413,30 @@ def test_search_grouped_keeps_one_language_per_card():
     assert [h.id for h in groups[0].highlights] == ["es1"]   # matched lang wins; ca twin dropped
 
 
+def test_card_picks_passages_by_score_and_shows_them_in_reading_order():
+    # The three best passages make the card, but they read in speech order; the
+    # card's score is still its best passage, wherever that sits.
+    def at(id_, block, chunk):
+        return SearchHit(id=id_, score=0.5, payload={
+            "text": id_, "lang": "es", "block_index": block, "chunk_index": chunk})
+
+    hi = [at("late", 1, 0), at("early", 0, 2), at("middle", 0, 7), at("dropped", 0, 0)]
+
+    class _Store:
+        def search_grouped(self, name, vector, group_by, limit, group_size,
+                           filters=None, exclude=None):
+            return [SpeechGroup(speech_id="A", score=0.5, highlights=hi)]
+
+    service = SearchSpeeches(
+        settings=_settings(), embedder=_FakeEmbedder(), store=_Store(),
+        reranker=_ScoresById({"late": 0.9, "early": 0.8, "middle": 0.7, "dropped": 0.1}))
+
+    groups = service.search_grouped("q", page_size=5, highlights=3)
+
+    assert [h.id for h in groups[0].highlights] == ["early", "middle", "late"]
+    assert groups[0].score == 0.9
+
+
 # --- Grouped top-up: cards must show what the detail page would --------------
 
 def _passage(id_, speech_id, score=0.5):
