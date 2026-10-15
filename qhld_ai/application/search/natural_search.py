@@ -215,6 +215,25 @@ class NaturalSearchSpeeches:
             raise NotASpeechQuery(query)
         return resolution, filters, semantic, apply_floor
 
+    @staticmethod
+    def _search_text(parsed, semantic):
+        """What retrieval and reranking are given for the topic: its Spanish
+        translation when the parser supplied one, the topic itself otherwise.
+
+        The corpus is mostly Spanish, and a topic left in the language it was
+        asked in loses both stages at once: the bi-encoder ranks the speeches in
+        the query's own language first, and the cross-encoder scores a
+        Spanish passage against a co-official topic as if it were unrelated —
+        measured 2026-09-30, the same Yolanda Díaz speech scored 0.31 for
+        'empleo' and 0.017 / 0.006 / 0.002 for 'emprego' / 'l'ocupació' /
+        'enplegua', so the floor emptied three of the four languages. Only the
+        search sees the translation: the topic the user wrote stays what the
+        result reports, because it is what the interface shows back to them.
+
+        ``getattr`` because a parse cached before the field existed has none."""
+        translated = (getattr(parsed, "semantic_query_es", None) or "").strip()
+        return translated if semantic and translated else semantic
+
     @traceable(name="natural_search", run_type="chain")
     def execute(self, query, today, k=10, grouped=False, highlights=3,
                 exclude=None, parsed=None) -> NaturalResult:
@@ -243,13 +262,14 @@ class NaturalSearchSpeeches:
             return NaturalResult(
                 parsed=parsed, resolution=resolution, semantic_query=semantic,
                 hits=hits, grouped=grouped, browse=True)
+        text = self._search_text(parsed, semantic)
         if grouped:
             hits = self.search.search_grouped(
-                semantic, page_size=k, highlights=highlights, filters=filters,
+                text, page_size=k, highlights=highlights, filters=filters,
                 exclude=exclude, apply_floor=apply_floor)
         else:
             hits = self.search.search(
-                semantic, k=k, filters=filters, apply_floor=apply_floor)
+                text, k=k, filters=filters, apply_floor=apply_floor)
         return NaturalResult(
             parsed=parsed, resolution=resolution, semantic_query=semantic,
             hits=hits, grouped=grouped)
@@ -292,8 +312,8 @@ class NaturalSearchSpeeches:
         scoped = {key: value for key, value in (filters or {}).items() if key != "lang"}
         scoped["speech_id"] = speech_id
         hits = self.search.search(
-            semantic, k=_PASSAGES_K, filters=scoped, apply_floor=apply_floor,
-            lang=(filters or {}).get("lang"))
+            self._search_text(parsed, semantic), k=_PASSAGES_K, filters=scoped,
+            apply_floor=apply_floor, lang=(filters or {}).get("lang"))
         return NaturalResult(
             parsed=parsed, resolution=resolution, semantic_query=semantic,
             hits=hits)

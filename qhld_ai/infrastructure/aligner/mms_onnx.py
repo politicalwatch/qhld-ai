@@ -375,12 +375,13 @@ _SYMBOLS = {
     "gl": {"%": "por cento", "€": "euros", "$": "dólares", "&": "e"},
 }
 
-# Spanish stands in for a language num2words cannot read numbers in. Measured rather than
-# assumed: what places a cue boundary is a run of tokens of roughly the right *length*
-# filling the figure's gap, not the letters in it. Reading Galician figures in Portuguese
-# instead of Spanish moved 35 of 35 of them by exactly zero frames, and Spanish
-# "cuarenta y siete" placed a Basque "berrogeita zazpi" correctly. So the stand-in is
-# there to occupy the audio, and only the confidence score is told not to trust it.
+# Spanish stands in for a language num2words cannot read numbers in — Galician and Basque,
+# here. What fills the figure's gap for the aligner is a run of tokens of roughly the right
+# *length*, not the letters in it, so the stand-in is there to occupy the audio. What it
+# must not reach is the confidence check: before the substitution was excluded from it, a
+# Galician alignment scored 89,0 against the 91,0 it got with its figures left unspoken,
+# with the timings identical either way. That is why ``_read_in_another_language`` keeps
+# these words out of ``_confidence`` rather than out of the alignment.
 _FALLBACK_NUMERAL_LANG = "es"
 
 # num2words spells a decimal point out; every language of this Parliament says "coma",
@@ -407,10 +408,12 @@ def _verbalise(word, lang):
     """Numerals and symbols as the words they are read out as, in ``lang`` where we can.
 
     The vocabulary has no digit tokens at all, so ``artículo 49`` would offer the aligner
-    nothing for five spoken syllables — and a figure that opens or closes a cue then
-    borrows a neighbour's timing, dragging that subtitle line by as much as two seconds.
-    Measured: a figure *inside* a cue is anchored by the words either side of it and moves
-    not at all, so this earns its place at cue boundaries specifically.
+    nothing for five spoken syllables and that audio goes unaccounted for. The measured
+    effect on cues is nil, though: the same speech aligned with and without verbalisation
+    moved no cue at all — 0 ms across its 15 figure-bearing cues — because at cue
+    granularity the neighbouring words fix the edges. So this is kept as a refinement and
+    not a requirement: it costs almost nothing, and it would matter for a cue made up
+    mostly of figures or for word-level timings.
 
     Spanish thousands separators and decimal commas are read the Spanish way: ``118.885``
     is a hundred and eighteen thousand, ``47,5`` is forty-seven point five.

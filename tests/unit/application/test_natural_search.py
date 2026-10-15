@@ -570,3 +570,44 @@ def test_passages_of_a_query_without_a_language_pass_no_hint():
     service.passages("vivienda", today=date(2025, 7, 3), speech_id="sp-1")
 
     assert service.search.langs[0] is None
+
+
+# --- A topic asked in a co-official language is searched in Spanish ----------
+
+def test_a_translated_topic_is_what_gets_searched():
+    parsed = ParsedQuery(semantic_query="emprego", semantic_query_es="empleo",
+                         speakers=["Yolanda Díaz"])
+    resolution = Resolution(filters={"speaker": "Díaz Pérez, Yolanda"})
+    service = _service(parsed, resolution)
+    result = service.execute("Discursos de Yolanda Díaz sobre emprego",
+                             today=date(2026, 9, 30), grouped=True)
+    kind, query, *_ = service.search.calls[0]
+    assert (kind, query) == ("grouped", "empleo")
+    # ...while the result reports the topic as the user wrote it: it is what the
+    # interface shows back to them.
+    assert result.semantic_query == "emprego"
+
+
+def test_without_a_translation_the_topic_itself_is_searched():
+    service = _service(ParsedQuery(semantic_query="empleo digno"), Resolution())
+    service.execute("Intervenciones sobre empleo digno", today=date(2026, 9, 30))
+    assert service.search.calls[0][1] == "empleo digno"
+
+
+def test_a_translation_never_invents_a_topic():
+    # An empty topic browses; a stray translation must not turn it into a search.
+    parsed = ParsedQuery(semantic_query="", semantic_query_es="empleo")
+    service = _service(parsed, Resolution(filters={"speaker": "Díaz Pérez, Yolanda"}))
+    result = service.execute("Discursos de Yolanda Díaz", today=date(2026, 9, 30))
+    assert service.search.calls[0][0] == "browse"
+    assert result.browse
+
+
+def test_passages_search_the_translated_topic_too():
+    # The detail page must highlight what the results page matched.
+    parsed = ParsedQuery(semantic_query="la feina decent",
+                         semantic_query_es="el trabajo decente")
+    service = _service(parsed, Resolution())
+    service.passages("Discursos sobre la feina decent", today=date(2026, 9, 30),
+                     speech_id="sp-1")
+    assert service.search.calls[0][1] == "el trabajo decente"

@@ -49,8 +49,20 @@ class ParsedQuery(BaseModel):
     semantic_query: str = Field(
         description=(
             "The thematic content to search for — what the speech is ABOUT — with "
-            "speaker, mentioned-person, group/party and date constraints removed. "
+            "speaker, mentioned-person, group/party and date constraints removed, "
+            "in the language the query is written in (never translated), without "
+            "the word that introduces it ('sobre', 'buruz'). "
             "Empty string if the query is purely a filter with no topic."))
+    semantic_query_es: str | None = Field(
+        default=None,
+        description=(
+            "The same topic translated into Spanish, without a leading article, "
+            "when the query is written in another language (Catalan, Galician, "
+            "Basque…), so it can be searched against a corpus that is mostly "
+            "Spanish: 'emprego' → 'empleo', \"l'ocupació\" → 'empleo', 'la feina "
+            "decent' → 'trabajo decente', 'lan duina' → 'trabajo digno'. Keep "
+            "proper names as they are. Null when semantic_query is already Spanish "
+            "or empty."))
     speakers: list[str] | None = Field(
         default=None,
         description=(
