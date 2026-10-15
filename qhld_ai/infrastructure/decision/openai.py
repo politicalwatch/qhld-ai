@@ -8,11 +8,13 @@ answered with ``probability``. The API may answer a question with
 ``type: "refusal"`` instead, which is treated like any other failure.
 
 Any failure raises ``DecisionUnavailable``; no retry layer, for the same reason
-as the System One adapter. Authenticates with ``settings.openai_api_key``. The
-``httpx.Client`` is created lazily on first use.
+as the System One adapter. The tokens the response reports, cached ones included,
+are put on the call's trace (see ``tracing``). Authenticates with
+``settings.openai_api_key``. The ``httpx.Client`` is created lazily on first use.
 """
 
 import httpx
+from langsmith import traceable
 
 from qhld_ai.domain.ports.decision_model import (
     Answer,
@@ -27,6 +29,7 @@ from qhld_ai.domain.ports.decision_model import (
 from qhld_ai.infrastructure.config.settings import Settings
 
 from .factory import _register
+from .tracing import record_usage
 
 _DECISIONS_URL = "https://api.openai.com/v1/decisions"
 
@@ -66,16 +69,23 @@ class OpenAIDecisionModel(DecisionModelPort):
                 timeout=self._timeout)
         return self._client
 
+    @traceable(name="decision_model", run_type="llm")
     def decide(self, state: str, questions: dict[str, Question]) -> dict[str, Answer]:
         body = {"model": self.model, "input": state,
                 "questions": [_encode(name, q) for name, q in questions.items()]}
         try:
             response = self.client.post(_DECISIONS_URL, json=body)
             response.raise_for_status()
-            answers = {row.get("name"): row for row in response.json()["answers"]}
-            return {name: _decode(q, answers[name]) for name, q in questions.items()}
+            payload = response.json()
+            answers = {row.get("name"): row for row in payload["answers"]}
+            decoded = {name: _decode(q, answers[name]) for name, q in questions.items()}
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
             raise DecisionUnavailable(f"{type(exc).__name__}: {exc}") from exc
+        usage = payload.get("usage") or {}
+        record_usage("openai", self.model, usage.get("input_tokens"),
+                     usage.get("output_tokens"),
+                     (usage.get("input_tokens_details") or {}).get("cached_tokens"))
+        return decoded
 
 
 @_register("openai")

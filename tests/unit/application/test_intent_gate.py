@@ -109,4 +109,5 @@ def test_its_own_provider_and_model_override_the_shared_ones():
         intent_gate_decision_provider="ollama", intent_gate_decision_model="clef:27b",
         ollama_base_url="http://localhost:11434"))
     assert gate.model == "clef:27b"
-    assert gate.decision_model._url == "http://localhost:11434/v1/systemone"
+    assert gate.decision_model.provider == "ollama"
+    assert gate.decision_model._base_url == "http://localhost:11434"

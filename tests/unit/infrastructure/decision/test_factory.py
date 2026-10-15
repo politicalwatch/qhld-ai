@@ -20,7 +20,8 @@ def test_typesafe_provider_calls_the_hosted_api_with_its_key():
         typesafe_api_key="ts_secret", decision_timeout=1.5))
     assert isinstance(model, SystemOneDecisionModel)
     assert model.model == "jev-1.13.0"
-    assert model._url == "https://api.typesafe.ai/v1/systemone"
+    assert model.provider == "typesafe"
+    assert model._base_url == "https://api.typesafe.ai"
     assert model._api_key == "ts_secret"
     assert model._timeout == 1.5
 
@@ -30,7 +31,8 @@ def test_ollama_provider_calls_the_local_server_without_a_key():
         decision_provider="ollama", decision_model="clef:27b",
         ollama_base_url="http://localhost:11434"))
     assert isinstance(model, SystemOneDecisionModel)
-    assert model._url == "http://localhost:11434/v1/systemone"
+    assert model.provider == "ollama"
+    assert model._base_url == "http://localhost:11434"
     assert model._api_key == ""
 
 

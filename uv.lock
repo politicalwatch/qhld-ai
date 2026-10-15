@@ -3386,6 +3386,7 @@ all = [
     { name = "onnxruntime" },
     { name = "sentence-transformers" },
     { name = "spacy" },
+    { name = "typesafe-sdk" },
 ]
 anthropic = [
     { name = "langchain-anthropic" },
@@ -3393,6 +3394,7 @@ anthropic = [
 backend = [
     { name = "fastembed" },
     { name = "langchain-openai" },
+    { name = "typesafe-sdk" },
 ]
 dev = [
     { name = "av" },
@@ -3406,6 +3408,7 @@ dev = [
     { name = "numpy" },
     { name = "onnxruntime" },
     { name = "spacy" },
+    { name = "typesafe-sdk" },
 ]
 engine = [
     { name = "av" },
@@ -3418,6 +3421,7 @@ engine = [
     { name = "numpy" },
     { name = "onnxruntime" },
     { name = "spacy" },
+    { name = "typesafe-sdk" },
 ]
 google = [
     { name = "langchain-google-genai" },
@@ -3447,6 +3451,9 @@ reranker-voyage = [
 ]
 sparse = [
     { name = "fastembed" },
+]
+typesafe = [
+    { name = "typesafe-sdk" },
 ]
 
 [package.dev-dependencies]
@@ -3478,16 +3485,17 @@ requires-dist = [
     { name = "py3langid", specifier = "==0.4.0" },
     { name = "pydantic-settings", specifier = "==2.16.0" },
     { name = "qdrant-client", specifier = "==1.19.1" },
-    { name = "qhld-ai", extras = ["openai", "ner", "sparse", "align"], marker = "extra == 'engine'" },
-    { name = "qhld-ai", extras = ["openai", "ollama", "anthropic", "google", "mistral", "reranker-cohere", "reranker-voyage", "reranker-local", "sparse", "ner", "align"], marker = "extra == 'all'" },
-    { name = "qhld-ai", extras = ["openai", "ollama", "ner", "sparse", "align"], marker = "extra == 'dev'" },
-    { name = "qhld-ai", extras = ["openai", "sparse"], marker = "extra == 'backend'" },
+    { name = "qhld-ai", extras = ["openai", "ner", "sparse", "align", "typesafe"], marker = "extra == 'engine'" },
+    { name = "qhld-ai", extras = ["openai", "ollama", "anthropic", "google", "mistral", "reranker-cohere", "reranker-voyage", "reranker-local", "sparse", "ner", "align", "typesafe"], marker = "extra == 'all'" },
+    { name = "qhld-ai", extras = ["openai", "ollama", "ner", "sparse", "align", "typesafe"], marker = "extra == 'dev'" },
+    { name = "qhld-ai", extras = ["openai", "sparse", "typesafe"], marker = "extra == 'backend'" },
     { name = "qhld-data", git = "https://github.com/politicalwatch/qhld-data.git?branch=feat%2Fparliamentary-speech-analysis" },
     { name = "sentence-transformers", marker = "extra == 'reranker-local'", specifier = "==6.1.0" },
     { name = "spacy", marker = "extra == 'ner'", specifier = ">=3.8,<3.9" },
     { name = "thefuzz", specifier = "==0.22.1" },
+    { name = "typesafe-sdk", marker = "extra == 'typesafe'", specifier = "==0.7.5" },
 ]
-provides-extras = ["openai", "ollama", "anthropic", "google", "mistral", "reranker-cohere", "reranker-voyage", "reranker-local", "sparse", "ner", "align", "backend", "engine", "dev", "all"]
+provides-extras = ["openai", "ollama", "anthropic", "google", "mistral", "reranker-cohere", "reranker-voyage", "reranker-local", "typesafe", "sparse", "ner", "align", "backend", "engine", "dev", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -4406,6 +4414,25 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/57/15/9b7e2e2e7c87d01366185b198b3febc6bc0c973f2bf21a62da4ab7d3495e/types_requests-2.33.0.20261006.tar.gz", hash = "sha256:0652999e9306aea345f40732d58fa49a7f6cade6a0d74d92119c5c8d82eddaf0", size = 25316, upload-time = "2026-10-06T08:15:57.782Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4d/72/b82789207b3d360ce9f5a4372c790c52cc3dd928aeb7d4faeec652b651b2/types_requests-2.33.0.20261006-py3-none-any.whl", hash = "sha256:26cc8146505cab33cda9737991929e4144c559bebe05078ccc6998f27c4ca2c1", size = 21445, upload-time = "2026-10-06T08:15:56.658Z" },
+]
+
+[[package]]
+name = "typesafe-sdk"
+version = "0.7.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "httpx2" },
+    { name = "packaging" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "tenacity" },
+    { name = "truststore", marker = "sys_platform != 'emscripten'" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/26/4d/383aa14f4cfe5fb41023ea1cab52d7f79cc31ab200ee7314317cf89db744/typesafe_sdk-0.7.5.tar.gz", hash = "sha256:1eeeb0dc80a7161d84896db42a5016dc0a7c8872fa16540b70163e5357b6d398", size = 34152, upload-time = "2026-10-14T21:21:42.837Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/f6/bee4c3b49570c2d312057c9e37c1446cf37eb1b86bf5872f7a797e803326/typesafe_sdk-0.7.5-py3-none-any.whl", hash = "sha256:967a8b61494d536abb55ee3f3a2b10e81685cb6baad6ccdcab588bdc6c9b86d2", size = 49948, upload-time = "2026-10-14T21:21:41.337Z" },
 ]
 
 [[package]]

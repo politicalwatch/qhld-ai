@@ -78,3 +78,32 @@ def test_decodes_answers_by_name_whatever_their_order():
 def test_any_unusable_response_is_unavailable(handler):
     with pytest.raises(DecisionUnavailable):
         _model(handler).decide("texto", {"kind": CHOICE})
+
+
+class _Run:
+    def __init__(self):
+        self.metadata, self.usage = None, None
+
+    def set(self, metadata=None, usage_metadata=None):
+        self.metadata, self.usage = metadata, usage_metadata
+
+
+def test_the_reported_tokens_go_on_the_trace_cached_ones_included(monkeypatch):
+    from qhld_ai.infrastructure.decision import tracing
+
+    run = _Run()
+    monkeypatch.setattr(tracing, "get_current_run_tree", lambda: run)
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "model": "gpt-6-luna",
+            "answers": [{"type": "choice", "name": "kind", "choice": "a",
+                         "probabilities": [{"value": "a", "probability": 1.0}]}],
+            "usage": {"input_tokens": 236, "output_tokens": 0,
+                      "input_tokens_details": {"cached_tokens": 128}}})
+
+    _model(handler).decide("texto", {"kind": CHOICE})
+
+    assert run.metadata == {"ls_provider": "openai", "ls_model_name": "gpt-6-luna"}
+    assert run.usage == {"input_tokens": 236, "output_tokens": 0, "total_tokens": 236,
+                         "input_token_details": {"cache_read": 128}}
