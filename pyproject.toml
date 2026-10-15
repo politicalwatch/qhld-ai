@@ -12,14 +12,14 @@ requires-python = ">=3.12"
 # so each image installs only what it serves (see the profiles: backend/engine/
 # dev/all). The llm/embeddings factories skip providers whose SDK is absent.
 dependencies = [
-    "pydantic-settings==2.15.0",
+    "pydantic-settings==2.16.0",
     "thefuzz==0.22.1",
-    "langchain-core==1.6.4",
+    "langchain-core==1.6.10",
     "qhld-data",
     "py3langid==0.4.0",
     "qdrant-client==1.19.1",
-    "httpx",
-    "langsmith>=0.10",
+    "httpx==0.28.1",
+    "langsmith==0.14.8",
 ]
 
 [project.optional-dependencies]
@@ -27,19 +27,19 @@ dependencies = [
 # LLM + embeddings providers. langchain-openai also serves Novita (its adapters
 # wrap ChatOpenAI/OpenAIEmbeddings against Novita's OpenAI-compatible endpoint);
 # langchain-ollama also serves vMLX.
-openai = ["langchain-openai==1.6.0"]
+openai = ["langchain-openai==1.7.2"]
 ollama = ["langchain-ollama==1.1.0"]
-anthropic = ["langchain-anthropic==1.7.0"]
-google = ["langchain-google-genai==4.3.7"]
+anthropic = ["langchain-anthropic==1.7.6"]
+google = ["langchain-google-genai==4.4.2"]
 mistral = ["langchain-mistralai==1.1.6"]
 # Rerankers. Hosted jina/novita need no SDK (direct httpx, in core). cohere and
 # voyage wrap vendor SDKs; reranker-local is the in-process cross-encoder and
 # pulls torch (~500M, far more on Linux w/ CUDA) — kept out of prod/dev images.
-reranker-cohere = ["langchain-cohere>=0.6.0"]
-reranker-voyage = ["langchain-voyageai>=0.4.0"]
-reranker-local = ["sentence-transformers>=3.3.0"]
+reranker-cohere = ["langchain-cohere==0.6.0"]
+reranker-voyage = ["langchain-voyageai==0.4.1"]
+reranker-local = ["sentence-transformers==6.1.0"]
 # BM25 sparse embedder — used at index time (engine) AND query time (backend).
-sparse = ["fastembed==0.8.0"]
+sparse = ["fastembed==0.9.0"]
 # spaCy NER + rule-based query parser. The es_core_news_lg wheel is ~600M; only
 # the engine tags speakers/mentions/entities, so this stays out of the backend.
 ner = [
@@ -55,11 +55,11 @@ ner = [
 # drives, at ~44M against ~419M for the system package, so no image needs it
 # installed and a laptop and a container decode with the same code.
 align = [
-    "onnxruntime>=1.20",
-    "numpy>=2",
-    "num2words>=0.5",
-    "huggingface_hub>=0.26",
-    "av>=14",
+    "onnxruntime==1.31.0",
+    "numpy==2.5.4",
+    "num2words==0.5.14",
+    "huggingface_hub==1.33.0",
+    "av==19.0.1",
 ]
 
 # --- Profiles: what each deployment installs (self-referential extras) --------
