@@ -7,7 +7,7 @@ Request and response shape match the other hosted providers:
 ``{index, relevance_score}``, mapped back by index rather than by row order.
 Authenticates with ``settings.digitalocean_api_key`` (env DIGITALOCEAN_API_KEY)
 as a bearer token. No retry layer: a rate-limited call fails fast and surfaces,
-the same policy as the other hosted rerankers. The ``httpx.Client`` is created
+the same policy as the other hosted rerankers. The ``httpx2.Client`` is created
 lazily on first use, so importing this module stays cheap.
 
 Two traits of this API shape the code:
@@ -56,9 +56,9 @@ class DigitalOceanReranker(RerankerPort):
     @property
     def client(self):
         if self._client is None:
-            import httpx
+            import httpx2
 
-            self._client = httpx.Client(
+            self._client = httpx2.Client(
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 timeout=self._timeout,
             )

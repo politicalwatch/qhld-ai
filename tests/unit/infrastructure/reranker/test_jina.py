@@ -1,9 +1,9 @@
 """Offline tests for the JinaReranker — HTTP is stubbed with
-httpx.MockTransport so no server (or network) is involved."""
+httpx2.MockTransport so no server (or network) is involved."""
 
 import json
 
-import httpx
+import httpx2
 import pytest
 
 from qhld_ai.domain.ports.vector_store import SearchHit
@@ -18,9 +18,9 @@ def _reranker(handler, api_key="jina_secret"):
     """A JinaReranker whose lazy client is replaced by a mock transport,
     keeping the real client's headers (built the same way)."""
     reranker = JinaReranker(MODEL, api_key)
-    reranker._client = httpx.Client(
+    reranker._client = httpx2.Client(
         headers={"Authorization": f"Bearer {api_key}"},
-        transport=httpx.MockTransport(handler),
+        transport=httpx2.MockTransport(handler),
     )
     return reranker
 
@@ -38,7 +38,7 @@ def _scores_by_trailing_int(request):
         for i, doc in enumerate(body["documents"])
     ]
     rows.sort(key=lambda row: row["relevance_score"], reverse=True)
-    return httpx.Response(200, json={"results": rows})
+    return httpx2.Response(200, json={"results": rows})
 
 
 def test_rerank_reorders_and_rescores_by_served_scores():
@@ -59,7 +59,7 @@ def test_rerank_calls_the_hosted_endpoint_with_bearer_auth():
         seen["url"] = str(request.url)
         seen["auth"] = request.headers.get("authorization")
         seen["body"] = json.loads(request.content)
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"results": [{"index": 0, "relevance_score": 0.5}]}
         )
 
@@ -86,9 +86,9 @@ def test_rerank_fails_fast_on_rate_limits():
 
     def handler(request):
         calls.append(request)
-        return httpx.Response(429, text="slow down")
+        return httpx2.Response(429, text="slow down")
 
     reranker = _reranker(handler)
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(httpx2.HTTPStatusError):
         reranker.rerank("q", [_hit("a", 0.9, "t1")], k=1)
     assert len(calls) == 1                     # no retry: surface, don't absorb

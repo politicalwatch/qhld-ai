@@ -5,7 +5,7 @@ model lives in a dedicated TEI server process (GPU-resident, persistent across
 callers), so search processes stay torch-free and repeated runs don't reload
 the weights. TEI's ``/rerank`` applies the model's sigmoid by default, matching
 ``CrossEncoder.predict``'s score space, so score thresholds calibrated against
-the in-process adapter carry over. The ``httpx.Client`` is created lazily on
+the in-process adapter carry over. The ``httpx2.Client`` is created lazily on
 first use, so importing this module stays cheap.
 """
 
@@ -25,9 +25,9 @@ class TEIReranker(RerankerPort):
     @property
     def client(self):
         if self._client is None:
-            import httpx
+            import httpx2
 
-            self._client = httpx.Client(
+            self._client = httpx2.Client(
                 base_url=self._base_url, timeout=self._timeout
             )
         return self._client

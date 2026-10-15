@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 
 # Core: always installed, regardless of which providers an image runs. The
 # vector store, language detection, fuzzy catalog matching and tracing are on
-# every code path; httpx is used directly by the hosted rerankers (jina/novita).
+# every code path; httpx2 is used directly by the hosted rerankers (jina/novita).
 # Everything provider- or feature-specific lives in optional-dependencies below,
 # so each image installs only what it serves (see the profiles: backend/engine/
 # dev/all). The llm/embeddings factories skip providers whose SDK is absent.
@@ -18,7 +18,7 @@ dependencies = [
     "qhld-data",
     "py3langid==0.4.0",
     "qdrant-client==1.19.1",
-    "httpx==0.28.1",
+    "httpx2==2.13.1",
     "langsmith==0.14.9",
 ]
 
@@ -32,7 +32,7 @@ ollama = ["langchain-ollama==1.1.0"]
 anthropic = ["langchain-anthropic==1.7.6"]
 google = ["langchain-google-genai==4.4.2"]
 mistral = ["langchain-mistralai==1.1.6"]
-# Rerankers. Hosted jina/novita need no SDK (direct httpx, in core). cohere and
+# Rerankers. Hosted jina/novita need no SDK (direct httpx2, in core). cohere and
 # voyage wrap vendor SDKs; reranker-local is the in-process cross-encoder and
 # pulls torch (~500M, far more on Linux w/ CUDA) — kept out of prod/dev images.
 reranker-cohere = ["langchain-cohere==0.6.0"]

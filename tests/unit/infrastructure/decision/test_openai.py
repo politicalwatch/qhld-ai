@@ -1,9 +1,9 @@
 """Offline tests for the OpenAI Decisions model — HTTP is stubbed with
-httpx.MockTransport so no server (or network) is involved."""
+httpx2.MockTransport so no server (or network) is involved."""
 
 import json
 
-import httpx
+import httpx2
 import pytest
 
 from qhld_ai.domain.ports.decision_model import (
@@ -18,14 +18,14 @@ PREDICATE = Predicate(instructions="¿Es una búsqueda?")
 
 def _model(handler, api_key="sk_secret"):
     model = OpenAIDecisionModel("gpt-6-luna", api_key)
-    model._client = httpx.Client(
+    model._client = httpx2.Client(
         headers={"Authorization": f"Bearer {api_key}"},
-        transport=httpx.MockTransport(handler))
+        transport=httpx2.MockTransport(handler))
     return model
 
 
 def _answers(*answers):
-    return lambda request: httpx.Response(200, json={"model": "gpt-6-luna",
+    return lambda request: httpx2.Response(200, json={"model": "gpt-6-luna",
                                                      "answers": list(answers)})
 
 
@@ -71,8 +71,8 @@ def test_decodes_answers_by_name_whatever_their_order():
 
 
 @pytest.mark.parametrize("handler", [
-    lambda request: httpx.Response(429, json={"error": "rate limited"}),
-    lambda request: httpx.Response(200, json={"answers": []}),
+    lambda request: httpx2.Response(429, json={"error": "rate limited"}),
+    lambda request: httpx2.Response(200, json={"answers": []}),
     _answers({"type": "refusal", "name": "kind"}),
 ])
 def test_any_unusable_response_is_unavailable(handler):
@@ -95,7 +95,7 @@ def test_the_reported_tokens_go_on_the_trace_cached_ones_included(monkeypatch):
     monkeypatch.setattr(tracing, "get_current_run_tree", lambda: run)
 
     def handler(request):
-        return httpx.Response(200, json={
+        return httpx2.Response(200, json={
             "model": "gpt-6-luna",
             "answers": [{"type": "choice", "name": "kind", "choice": "a",
                          "probabilities": [{"value": "a", "probability": 1.0}]}],

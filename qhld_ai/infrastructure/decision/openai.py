@@ -10,10 +10,10 @@ answered with ``probability``. The API may answer a question with
 Any failure raises ``DecisionUnavailable``; no retry layer, for the same reason
 as the System One adapter. The tokens the response reports, cached ones included,
 are put on the call's trace (see ``tracing``). Authenticates with
-``settings.openai_api_key``. The ``httpx.Client`` is created lazily on first use.
+``settings.openai_api_key``. The ``httpx2.Client`` is created lazily on first use.
 """
 
-import httpx
+import httpx2
 from langsmith import traceable
 
 from qhld_ai.domain.ports.decision_model import (
@@ -64,7 +64,7 @@ class OpenAIDecisionModel(DecisionModelPort):
     @property
     def client(self):
         if self._client is None:
-            self._client = httpx.Client(
+            self._client = httpx2.Client(
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 timeout=self._timeout)
         return self._client
@@ -79,7 +79,7 @@ class OpenAIDecisionModel(DecisionModelPort):
             payload = response.json()
             answers = {row.get("name"): row for row in payload["answers"]}
             decoded = {name: _decode(q, answers[name]) for name, q in questions.items()}
-        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        except (httpx2.HTTPError, ValueError, KeyError, TypeError) as exc:
             raise DecisionUnavailable(f"{type(exc).__name__}: {exc}") from exc
         usage = payload.get("usage") or {}
         record_usage("openai", self.model, usage.get("input_tokens"),

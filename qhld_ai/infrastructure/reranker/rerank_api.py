@@ -9,7 +9,7 @@ servers are unauthenticated and unmetered, so there is no API key and no retry
 layer; hosted vendors get dedicated providers ("jina", "cohere", "voyage")
 instead. Score space is the served model's own (e.g. jina-reranker-v3 returns
 cosine similarities, not sigmoid probabilities), so relevance floors
-calibrated for another model do NOT carry over. The ``httpx.Client`` is
+calibrated for another model do NOT carry over. The ``httpx2.Client`` is
 created lazily on first use, so importing this module stays cheap.
 """
 
@@ -30,9 +30,9 @@ class RerankAPIReranker(RerankerPort):
     @property
     def client(self):
         if self._client is None:
-            import httpx
+            import httpx2
 
-            self._client = httpx.Client(timeout=self._timeout)
+            self._client = httpx2.Client(timeout=self._timeout)
         return self._client
 
     def rerank(self, query: str, hits: list[SearchHit], k: int) -> list[SearchHit]:

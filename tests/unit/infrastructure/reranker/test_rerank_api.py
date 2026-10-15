@@ -1,9 +1,9 @@
 """Offline tests for the RerankAPIReranker — HTTP is stubbed with
-httpx.MockTransport so no server (or network) is involved."""
+httpx2.MockTransport so no server (or network) is involved."""
 
 import json
 
-import httpx
+import httpx2
 import pytest
 
 from qhld_ai.domain.ports.vector_store import SearchHit
@@ -18,7 +18,7 @@ MODEL = "jinaai/jina-reranker-v3-mlx"
 def _reranker(handler):
     """A RerankAPIReranker whose lazy client is replaced by a mock transport."""
     reranker = RerankAPIReranker(URL, MODEL)
-    reranker._client = httpx.Client(transport=httpx.MockTransport(handler))
+    reranker._client = httpx2.Client(transport=httpx2.MockTransport(handler))
     return reranker
 
 
@@ -35,7 +35,7 @@ def _scores_by_trailing_int(request):
         for i, doc in enumerate(body["documents"])
     ]
     rows.sort(key=lambda row: row["relevance_score"], reverse=True)
-    return httpx.Response(200, json={"results": rows})
+    return httpx2.Response(200, json={"results": rows})
 
 
 def test_rerank_reorders_and_rescores_by_served_scores():
@@ -56,7 +56,7 @@ def test_rerank_sends_model_query_and_documents_to_the_endpoint():
         seen["url"] = str(request.url)
         seen["auth"] = request.headers.get("authorization")
         seen["body"] = json.loads(request.content)
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"results": [{"index": 0, "relevance_score": 0.5}]}
         )
 
@@ -80,8 +80,8 @@ def test_rerank_empty_hits_returns_empty_without_calling_the_server():
 
 def test_rerank_raises_on_server_errors():
     def handler(request):
-        return httpx.Response(429, text="slow down")
+        return httpx2.Response(429, text="slow down")
 
     reranker = _reranker(handler)
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(httpx2.HTTPStatusError):
         reranker.rerank("q", [_hit("a", 0.9, "t1")], k=1)

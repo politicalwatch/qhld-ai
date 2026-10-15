@@ -1,9 +1,9 @@
-"""Offline tests for the TEIReranker — HTTP is stubbed with httpx.MockTransport
+"""Offline tests for the TEIReranker — HTTP is stubbed with httpx2.MockTransport
 so no server (or network) is involved."""
 
 import json
 
-import httpx
+import httpx2
 import pytest
 
 from qhld_ai.domain.ports.vector_store import SearchHit
@@ -17,8 +17,8 @@ BASE_URL = "http://tei.test"
 def _reranker(handler):
     """A TEIReranker whose lazy client is replaced by a mock-transport client."""
     reranker = TEIReranker(BASE_URL)
-    reranker._client = httpx.Client(
-        base_url=BASE_URL, transport=httpx.MockTransport(handler)
+    reranker._client = httpx2.Client(
+        base_url=BASE_URL, transport=httpx2.MockTransport(handler)
     )
     return reranker
 
@@ -36,7 +36,7 @@ def _scores_by_trailing_int(request):
         for i, text in enumerate(body["texts"])
     ]
     rows.sort(key=lambda row: row["score"], reverse=True)  # TEI returns sorted
-    return httpx.Response(200, json=rows)
+    return httpx2.Response(200, json=rows)
 
 
 def test_rerank_reorders_and_rescores_by_served_scores():
@@ -56,7 +56,7 @@ def test_rerank_sends_query_and_texts_to_the_rerank_route():
     def handler(request):
         seen["path"] = request.url.path
         seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json=[{"index": 0, "score": 0.5}])
+        return httpx2.Response(200, json=[{"index": 0, "score": 0.5}])
 
     reranker = _reranker(handler)
     reranker.rerank("la consulta", [_hit("a", 0.9, "un pasaje")], k=1)
@@ -76,6 +76,6 @@ def test_rerank_empty_hits_returns_empty_without_calling_the_server():
 
 
 def test_rerank_raises_on_server_error():
-    reranker = _reranker(lambda request: httpx.Response(500, text="boom"))
-    with pytest.raises(httpx.HTTPStatusError):
+    reranker = _reranker(lambda request: httpx2.Response(500, text="boom"))
+    with pytest.raises(httpx2.HTTPStatusError):
         reranker.rerank("q", [_hit("a", 0.9, "t1")], k=1)
