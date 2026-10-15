@@ -92,6 +92,33 @@ class Settings(BaseSettings):
     # (it called "Sánchez" Hungarian at 0.99 confidence).
     search_allowed_languages: list[str] = ["es", "ca", "gl", "eu"]
 
+    # Decision models: read text and answer typed questions with probabilities
+    # instead of generating text. "typesafe" (hosted Jev), "ollama" (local, through
+    # ollama_base_url) or "openai" (the Decisions API, through openai_api_key). These
+    # are the defaults for any task that uses one; a task may override them with its
+    # own provider/model settings (see intent_gate_*). Empty means no task has one.
+    # The timeout is short on purpose: decision models answer in well under a second,
+    # and every caller sits on the request path.
+    decision_provider: str = ""
+    decision_model: str = ""
+    decision_timeout: float = 3.0
+    typesafe_api_key: str = ""
+
+    # Intent gate: a decision model that turns away what is not a speech search
+    # before the parser runs, so a refusal costs one cheap classification instead of
+    # a full parse. The parser keeps its own gate behind it, so this only has to be
+    # right about what it refuses. Off unless enabled explicitly — configuring a
+    # decision model for another task must never switch it on. Empty provider/model
+    # fall back to decision_*. A query is refused when P(search) is below
+    # refuse_below, and refused as hostile when "hostile" is the top answer and its
+    # probability reaches hostile_above. A gate that cannot answer lets the query
+    # through to the parser.
+    intent_gate_enabled: bool = False
+    intent_gate_decision_provider: str = ""
+    intent_gate_decision_model: str = ""
+    intent_gate_refuse_below: float = 0.5
+    intent_gate_hostile_above: float = 0.5
+
     # Cross-encoder reranker. "noop" leaves bi-encoder order
     # untouched (the clean baseline); any other provider over-fetches
     # reranker_top_n passages and reorders them on (query, passage) relevance.

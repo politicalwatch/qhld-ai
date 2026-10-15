@@ -12,6 +12,14 @@ class SearchRefused(Exception):
 
     reason = "refused"
 
+    def __init__(self, *args, refused_by="parser"):
+        super().__init__(*args)
+        # Which layer turned the query away: the intent gate in front of the parser,
+        # or the parser itself. The same refusal reads the same to the user and counts
+        # the same towards a ban either way; this is kept for what we record, because
+        # the two layers cost very different amounts per refusal.
+        self.refused_by = refused_by
+
 
 class NotASpeechQuery(SearchRefused):
     """The input is not a search over parliamentary speeches (an instruction,

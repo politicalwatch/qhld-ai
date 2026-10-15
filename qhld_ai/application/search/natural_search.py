@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 from langsmith import traceable
 
+from qhld_ai.application.search.intent_gate import intent_gate_from_settings
 from qhld_ai.application.search.resolve_entities import EntityResolver, Resolution
 from qhld_ai.domain.entities import normalize_entity
 from qhld_ai.domain.errors import (
@@ -75,11 +76,14 @@ class NaturalResult:
 
 
 class NaturalSearchSpeeches:
-    def __init__(self, settings=None, parser=None, search=None, resolver=None):
+    def __init__(self, settings=None, parser=None, search=None, resolver=None,
+                 intent_gate=None):
         self.settings = settings or get_settings()
         self.parser = parser or create_query_parser_from_env(self.settings)
         self.search = search or self._default_search()
         self._resolver = resolver
+        # None when the gate is disabled, which is the default.
+        self.intent_gate = intent_gate or intent_gate_from_settings(self.settings)
 
     def _default_search(self):
         from qhld_ai.application.search.search_speeches import SearchSpeeches
@@ -147,6 +151,18 @@ class NaturalSearchSpeeches:
             return
         if language.strip().lower() not in {code.lower() for code in allowed}:
             raise UnsupportedLanguage(query, language)
+
+    def parse(self, query, today) -> ParsedQuery:
+        """The intent gate, then the parser. A query the gate refuses raises before
+        the parser is called, so it never pays for a parse; one the gate passes (or
+        cannot judge) is parsed and meets the parser's own gate in ``_prepare``.
+
+        Public because a caller that memoizes the parse (the API does, so "show more"
+        does not parse again) must go through the gate too — calling
+        ``self.parser`` directly would skip it."""
+        if self.intent_gate is not None:
+            self.intent_gate.check(query)
+        return self.parser.parse(query, today)
 
     def _prepare(self, query, parsed):
         """Shared prelude of ``execute`` and ``passages``: parse-gate, resolve,
@@ -241,8 +257,9 @@ class NaturalSearchSpeeches:
         speech_ids already shown, skipped so the next call yields fresh speeches
         (grouped mode only — flat hits have no stateless pagination). ``parsed``
         lets a caller reuse a previous parse of the same query (the parse is an
-        LLM call), skipping the parser entirely."""
-        parsed = parsed or self.parser.parse(query, today)
+        LLM call), skipping the intent gate and the parser entirely — that parse
+        already went through both."""
+        parsed = parsed or self.parse(query, today)
         resolution, filters, semantic, apply_floor = self._prepare(query, parsed)
         if resolution.blocked:
             # Some filter is unsatisfiable (e.g. a mentioned person absent from the
@@ -294,7 +311,7 @@ class NaturalSearchSpeeches:
         matches the transcript on screen. It still rides along as the
         sibling-scoring hint, which is what keeps the co-official passages above
         the floor."""
-        parsed = parsed or self.parser.parse(query, today)
+        parsed = parsed or self.parse(query, today)
         resolution, filters, semantic, apply_floor = self._prepare(query, parsed)
         if resolution.blocked:
             return NaturalResult(
