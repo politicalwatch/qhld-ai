@@ -56,20 +56,52 @@ def test_all_llm_providers_registered():
     } <= set(factory_module._PROVIDERS)
 
 
-def test_anthropic_omits_temperature_for_reasoning_models():
+def _anthropic(model, effort=""):
+    return create_llm_from_env(
+        _settings(llm_provider="anthropic", llm_model=model, llm_temperature=0.0,
+                  llm_reasoning_effort=effort, anthropic_api_key="x"))
+
+
+@pytest.mark.parametrize("model", [
+    "claude-sonnet-5", "claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5",
+    "claude-fable-5-1", "claude-opus-4-8",
+])
+def test_anthropic_omits_temperature_for_reasoning_models(model):
     # Claude 5 family / Opus 4.7-4.8 reject sampling params with a 400 — the
-    # adapter must not send temperature for them.
-    llm = create_llm_from_env(
-        _settings(llm_provider="anthropic", llm_model="claude-sonnet-5",
-                  llm_temperature=0.0, anthropic_api_key="x"))
+    # adapter must not send temperature for them, point releases included.
+    llm = _anthropic(model)
     assert llm.temperature is None
+    assert "temperature" not in llm._get_request_payload([("user", "q")])
 
 
 def test_anthropic_keeps_temperature_for_older_models():
-    llm = create_llm_from_env(
-        _settings(llm_provider="anthropic", llm_model="claude-haiku-4-5",
-                  llm_temperature=0.0, anthropic_api_key="x"))
+    llm = _anthropic("claude-haiku-4-5", effort="low")
     assert llm.temperature == pytest.approx(0.0)
+    # Older models take no effort: it must not leak into the request.
+    assert llm.reasoning_effort is None
+    assert llm.thinking is None
+
+
+def test_anthropic_reasoning_effort_enables_adaptive_thinking():
+    """Without explicit thinking, structured output forces the tool call and the
+    API switches thinking off, so "low" would silently behave like "none"."""
+    llm = _anthropic("claude-haiku-5-5", effort="low")
+    assert llm.thinking == {"type": "adaptive"}
+    payload = llm._get_request_payload([("user", "q")])
+    assert payload["output_config"]["effort"] == "low"
+    assert payload["thinking"] == {"type": "adaptive"}
+
+
+def test_anthropic_effort_none_disables_thinking():
+    llm = _anthropic("claude-haiku-5-5", effort="none")
+    assert llm.thinking == {"type": "disabled"}
+    assert llm.reasoning_effort == "low"
+
+
+def test_anthropic_without_effort_keeps_model_defaults():
+    llm = _anthropic("claude-haiku-5-5")
+    assert llm.thinking is None
+    assert llm.reasoning_effort is None
 
 
 def test_vmlx_uses_its_own_base_url():
